@@ -45,10 +45,38 @@ a Claude skill that's `~/.claude/skills/deploy/`; call it `<SKILL_DIR>` below.
 2. **GATES — stop and ask** (each needed a human on real deploys). See below.
 3. **Provision.** Key + VM + ports + public IP. See `provisioning.md`.
 4. **Build on box.** tar-pipe the clone → per-stack recipe → systemd → Caddy. See `build-recipes.md`.
-5. **Verify.** A real request (`curl https://<host>/healthz` or `/`), then any documented warmup.
+5. **Populate the data, then verify it ACTUALLY WORKS — not just HTTP 200.** A 200 with an
+   empty primary surface is a FAILED deploy. See "Verify like a user" below. This is the step
+   a generic agent skips — do not skip it, and do not wait to be asked.
 6. **Log it (beta loop).** Copy `<SKILL_DIR>/deploys/_TEMPLATE.md` → `deploys/NNN-<repo>.md`,
    fill the **friction log** — every "had to figure out X" is a feature. Fold mechanizable
    learnings into `analyze.py` and bump `CHANGELOG.md`.
+
+## Verify like a user — "deployed" ≠ "working"
+
+> **A health check / `/api/venues` returning seed rows is NOT proof the app works.**
+> The deploy is done when the app's PRIMARY user-facing surface renders real content.
+> (Real miss: declared a deploy "full stack working" on a 200 + 8 seeded venues while the
+> actual event feed was empty. The user had to ask "aren't there scripts to pull data?")
+
+Before claiming done, run this — proactively, every deploy:
+
+1. **Find the app's primary content** — the feed, listings, dashboard data. Load it as a user
+   would (`curl https://<host>/` and the main content API). If it's empty, you are NOT done.
+2. **Find & run the data pipeline.** Look in `package.json` scripts (`db:seed`, `*ingest*`,
+   `*scrape*`, `*enrich*`), API job routes (`/api/jobs/*`, `/api/cron/*`), and
+   `.github/workflows/*` cron. Run them in dependency order: **seed → ingest → enrich**.
+   Many are auth'd by a job secret you already generated (`X-Job-Secret`) — no extra creds.
+3. **Surface required keys + curation gates from the repo, don't guess.** Grep `.env.example`
+   and the job code: which steps need an API key (LLM enrichment, 3rd-party APIs), and is there
+   a moderation/approval gate (`review_status`, `is_published`, `approved`) before content goes
+   public? Report these explicitly and ask before spending on paid APIs.
+4. **Confirm the migration actually matched the code.** "migrate succeeded" ≠ "schema matches
+   schema.ts". Orphan migrations (a `.sql` missing from drizzle `meta/_journal.json`) get
+   silently skipped → runtime inserts fail with swallowed errors. After migrate, sanity-check
+   the columns the app writes exist (or run the framework's drift check).
+5. **Only then report done** — with a one-line proof of the real surface ("feed shows N events"),
+   or an explicit "deployed but the feed needs X (key/approval/data)" — never a bare "200 OK".
 
 ## Judgment gates — ASK, never assume
 

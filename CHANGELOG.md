@@ -3,6 +3,15 @@
 This is a **beta** skill that improves with every deploy. Each entry should trace
 to a real deploy's friction log.
 
+## [0.2.0] — 2026-06-05
+**Verify like a user — "deployed" ≠ "working".** Added a mandatory post-deploy phase:
+run the data pipeline (seed → ingest → enrich), surface required API keys + curation/
+approval gates from the repo, check migration-vs-code drift (orphan migrations), and
+confirm the PRIMARY user-facing surface renders real content before reporting done.
+A 200 with an empty feed is now an explicit failure, not a success.
+Driven by deploy #2 (ShoreScene): a "working" deploy that had an empty feed until the
+ingest job + Anthropic enrichment + approval were run.
+
 ## [0.1.0] — 2026-06-05
 Initial release. Proven end-to-end on a polyglot SvelteKit + JVM-worker app.
 
