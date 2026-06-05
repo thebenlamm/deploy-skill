@@ -33,7 +33,7 @@ Generic "deploy my repo" advice reaches for EC2 + Docker + CloudFront — more e
 Clone into your Claude skills directory:
 
 ```bash
-git clone https://github.com/<you>/deploy-skill ~/.claude/skills/deploy
+git clone https://github.com/thebenlamm/deploy-skill ~/.claude/skills/deploy
 ```
 
 (or clone anywhere and symlink it to `~/.claude/skills/deploy`.) Restart Claude Code; the `deploy` skill is now discoverable.
