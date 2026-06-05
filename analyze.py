@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""deploy-concierge analyzer — point it at a repo, get a sized deploy plan.
+
+Usage:
+    python3 analyze.py <github-url | local-path>
+
+Output: deploy-plan.json + a human summary. The plan is what drives provisioning
+(Lightsail VM / S3) via aws-mcp. Goal: compress the *figuring-out* — stack, DB,
+port, JVM, memory, cost — into one command.
+
+Every analysis step below traces to a real failure from deploy #1 (Parshandata).
+Dependency-free (stdlib only) so it runs anywhere.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+# ---- signal tables -------------------------------------------------------
+
+LANG_MARKERS = {
+    "node": ["package.json"],
+    "python": ["requirements.txt", "pyproject.toml", "Pipfile"],
+    "java": ["pom.xml", "build.gradle", "build.gradle.kts"],
+    "go": ["go.mod"],
+    "ruby": ["Gemfile"],
+    "php": ["composer.json"],
+    "rust": ["Cargo.toml"],
+}
+
+DB_SIGNALS = {
+    "pg": "postgres", "postgres": "postgres", "psycopg": "postgres", "prisma": "postgres",
+    "mysql": "mysql", "mysql2": "mysql", "mariadb": "mysql",
+    "mongo": "mongodb", "mongoose": "mongodb",
+    "redis": "redis", "ioredis": "redis", "sqlite": "sqlite",
+}
+
+FRAMEWORK_SIGNALS = [
+    "next", "react", "vue", "vite", "svelte", "angular", "nuxt",
+    "express", "fastify", "koa", "nestjs", "@nestjs/core",
+    "flask", "fastapi", "django", "gunicorn", "uvicorn",
+    "spring", "spring-boot", "quarkus", "rails", "sinatra", "laravel",
+]
+SERVER_FRAMEWORKS = {
+    "express", "fastify", "koa", "nestjs", "@nestjs/core", "next", "nuxt",
+    "flask", "fastapi", "django", "gunicorn", "uvicorn",
+    "spring", "spring-boot", "quarkus", "rails", "sinatra", "laravel",
+}
+STATIC_FRAMEWORKS = {"react", "vue", "vite", "svelte", "angular"}
+
+# Lightsail Linux VM bundles (approx monthly USD, 2-vCPU gen). The analyzer
+# *estimates*; provisioning confirms the exact price via the API. (ram_mb, class, usd)
+VM_BUNDLES = [
+    (512, "nano", 5), (1024, "micro", 7), (2048, "small", 12),
+    (4096, "medium", 24), (8192, "large", 44), (16384, "xlarge", 84),
+    (32768, "2xlarge", 164),
+]
+
+# Two learnings belong to the provisioning layer, NOT static analysis. We surface
+# them as caveats rather than pretend to detect them. (deploy #1 learnings 4 & 6.)
+PROVISIONING_CAVEATS = [
+    "Repo auth: clone server-side with platform-owned GitHub creds — a fresh host "
+    "has no GitHub identity (deploy #1: private repo failed `git clone` on the VM).",
+    "Public IP: on NAT'd hosts (Lightsail) instance metadata `public-ipv4` is EMPTY — "
+    "thread the allocated public IP from the provision step into config/DNS, don't query it.",
+    "Branch: the default branch may not build — confirm which branch is deployable "
+    "(deploy #1: `main` imported an uncommitted file; the fix was on a feature branch).",
+]
+
+
+# ---- pure detection helpers ----------------------------------------------
+
+def detect_databases(deps, files):
+    found = set()
+    for dep in deps:
+        low = dep.lower()
+        for sig, name in DB_SIGNALS.items():
+            if sig in low:
+                found.add(name)
+    if "schema.prisma" in files:
+        found.add("postgres")
+    return sorted(found)
+
+
+def detect_frameworks(deps):
+    found = []
+    for dep in deps:
+        low = dep.lower()
+        for sig in FRAMEWORK_SIGNALS:
+            if sig in low and sig not in found:
+                found.append(sig)
+    return found
+
+
+# ---- LEARNING 1: parse the Dockerfile's actual build/run steps -----------
+# File-presence alone is too shallow: a `FROM node` image that apt-installs the
+# JDK and runs `mvn` is a Node+JVM polyglot, and its *entrypoint* is node.
+
+_APT_RUNTIME_PKGS = {
+    "java": ["openjdk", "default-jdk", "default-jre", "maven", "gradle"],
+    "python": ["python3", "python3-pip", "python-is-python3"],
+    "node": ["nodejs", "npm"],
+    "ruby": ["ruby"], "go": ["golang"], "php": ["php"],
+}
+_BASE_IMAGE_RUNTIME = {
+    "node": "node", "python": "python", "openjdk": "java", "eclipse-temurin": "java",
+    "amazoncorretto": "java", "golang": "go", "ruby": "ruby", "php": "php", "rust": "rust",
+}
+
+def parse_dockerfile(text):
+    runtimes, build_steps = [], []
+    base = entrypoint_runtime = port = jvm_heap_mb = None
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        up = line.upper()
+
+        if up.startswith("FROM "):
+            img = line.split()[1].split("/")[-1].split(":")[0].lower()
+            base = img
+            for key, rt in _BASE_IMAGE_RUNTIME.items():
+                if img.startswith(key) and rt not in runtimes:
+                    runtimes.append(rt)
+        elif up.startswith("RUN "):
+            body = line[4:]
+            build_steps.append(body)
+            low = body.lower()
+            for rt, pkgs in _APT_RUNTIME_PKGS.items():
+                if any(p in low for p in pkgs) and rt not in runtimes:
+                    runtimes.append(rt)
+        elif up.startswith("EXPOSE "):
+            m = re.search(r"(\d+)", line)
+            if m:
+                port = int(m.group(1))
+        elif up.startswith(("CMD ", "ENTRYPOINT ")):
+            low = line.lower()
+            for rt in ("node", "java", "python", "ruby", "go", "php"):
+                tok = "python" if rt == "python" else rt
+                if re.search(rf"\b{tok}3?\b", low):
+                    entrypoint_runtime = rt
+                    break
+        # heap flag can appear in ENV or CMD
+        if jvm_heap_mb is None:
+            jvm_heap_mb = _parse_heap_mb(line)
+
+    return {"base": base, "runtimes": runtimes, "build_steps": build_steps,
+            "entrypoint_runtime": entrypoint_runtime, "port": port,
+            "jvm_heap_mb": jvm_heap_mb}
+
+
+def _parse_heap_mb(text):
+    """Extract a JVM max-heap floor in MB from -Xmx flags. A heap flag is a HARD
+    RAM floor — the #1 reason deploy #1's '$7 nano' guess was wrong."""
+    m = re.search(r"-Xmx\s*(\d+)\s*([gGmM])", text)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n * 1024 if m.group(2).lower() == "g" else n
+
+
+# ---- LEARNING 2: read deploy-intent docs (the ground truth was in-repo) --
+
+_DEPLOY_DOC_FILES = ["hosting-spec.md", "DEPLOY.md", "deploy.md", "DEPLOYMENT.md",
+                     "fly.toml", "render.yaml", "render.yml"]
+
+def parse_deploy_docs(path):
+    """Scan known deploy-intent files for RAM/CPU/disk/port/platform hints."""
+    for fn in _DEPLOY_DOC_FILES:
+        fp = os.path.join(path, fn)
+        if not os.path.exists(fp):
+            continue
+        try:
+            with open(fp, errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            continue
+        hints = {"source_file": fn}
+        ram = _find_ram_mb(text)
+        if ram:
+            hints["ram_mb"] = ram
+        m = re.search(r"(\d+)\s*v?cpus?\b", text, re.I)
+        if m:
+            hints["cpu"] = int(m.group(1))
+        m = re.search(r"(\d+)\s*GB\s*SSD|disk[^\d]{0,12}(\d+)\s*GB", text, re.I)
+        if m:
+            hints["disk_gb"] = int(m.group(1) or m.group(2))
+        if hints.get("ram_mb") or hints.get("cpu"):
+            return hints
+    return {}
+
+
+def _find_ram_mb(text):
+    """Pull a RAM figure from prose/tables/toml. Handles '~6 GB', 'memory = "2gb"',
+    '6144 MB'. Takes the first RAM-context match."""
+    for m in re.finditer(r"(?:RAM|memory|mem)[^\n]{0,40}?[~>=]*\s*(\d+(?:\.\d+)?)\s*(gb|mb|g|m)\b",
+                         text, re.I):
+        n = float(m.group(1)); unit = m.group(2).lower()
+        return int(n * 1024) if unit.startswith("g") else int(n)
+    # bare 'memory = "2gb"' (toml)
+    m = re.search(r'memory\s*=\s*["\']?(\d+)\s*(gb|mb|g|m)', text, re.I)
+    if m:
+        n = int(m.group(1)); unit = m.group(2).lower()
+        return n * 1024 if unit.startswith("g") else n
+    return None
+
+
+# ---- LEARNING 3: size the box to memory, not to a flat default -----------
+
+def estimate_required_ram_mb(facts):
+    """Return (mb, basis). Priority: explicit deploy-doc > JVM heap + headroom >
+    stack baseline. Returns the strongest signal available."""
+    docs = facts.get("deploy_docs") or {}
+    if docs.get("ram_mb"):
+        return docs["ram_mb"], f"explicit RAM from {docs.get('source_file', 'deploy doc')}"
+
+    heap = facts.get("jvm_heap_mb")
+    if heap:
+        # JVM heap + Node/OS headroom (deploy #1: 4G heap needed ~6G box)
+        return heap + 2048, f"JVM heap {heap}MB + 2GB node/OS headroom"
+
+    runtimes = set(facts.get("runtimes") or [])
+    if "java" in runtimes:
+        return 2048, "java runtime baseline (no heap flag found — verify)"
+    if runtimes & {"node", "python", "ruby", "php", "go"}:
+        return 1024, "lightweight runtime baseline"
+    return 1024, "default baseline"
+
+
+def _pick_bundle(required_mb):
+    for ram, cls, usd in VM_BUNDLES:
+        if ram >= required_mb:
+            return ram, cls, usd
+    return VM_BUNDLES[-1]
+
+
+# ---- LEARNING 5: catch unresolved local imports before burning a build ---
+# deploy #1: `main` imported ./_RecentSearches.svelte, never committed → hard
+# build failure only discovered after provisioning.
+#
+# HIGH PRECISION over recall (tuned against the real repo, which produced false
+# positives): only flag relative imports that NAME a concrete source file (explicit
+# extension) and whose exact target is absent. We deliberately SKIP:
+#   - extensionless specifiers (`./foo`) — resolve via index files / tsconfig paths
+#     / codegen; statically unknowable and the #1 false-positive source.
+#   - framework virtual modules (`./$types`, `$app/*` etc.) — generated at build.
+# The build itself is the backstop for everything we skip. Better to miss a rare
+# real one than cry wolf on a repo that builds fine.
+
+_IMPORT_RE = re.compile(r"""['"](\.{1,2}/[^'"]+)['"]""")
+_SRC_EXTS = (".svelte", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".vue")
+# only specifiers ending in one of these get checked (explicit-file imports)
+_FLAGGABLE_EXTS = (".svelte", ".vue", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+def check_unresolved_imports(path, max_files=600):
+    missing, seen, scanned = [], set(), 0
+    for root, dirs, files in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in
+                   ("node_modules", ".git", "build", "dist", ".svelte-kit", "target")]
+        for fn in files:
+            if not fn.endswith(_SRC_EXTS):
+                continue
+            if scanned >= max_files:
+                return missing
+            scanned += 1
+            fp = os.path.join(root, fn)
+            try:
+                with open(fp, errors="ignore") as f:
+                    src = f.read()
+            except Exception:
+                continue
+            for spec in _IMPORT_RE.findall(src):
+                base = spec.rsplit("/", 1)[-1]
+                if base.startswith("$"):                 # virtual module ($types …)
+                    continue
+                if not spec.endswith(_FLAGGABLE_EXTS):    # explicit-extension only
+                    continue
+                target = os.path.normpath(os.path.join(root, spec))
+                if os.path.exists(target):
+                    continue
+                key = (os.path.relpath(fp, path), spec)
+                if key in seen:
+                    continue
+                seen.add(key)
+                missing.append({"file": key[0], "import": spec})
+    return missing
+
+
+# ---- recommender ---------------------------------------------------------
+
+def recommend_target(facts):
+    fw = facts.get("frameworks", [])
+    dbs = facts.get("databases", [])
+    runtimes = facts.get("runtimes") or ([facts["language"]] if facts.get("language") else [])
+    warnings, next_steps = [], []
+
+    is_static = (not facts.get("has_server", True)
+                 and (not fw or all(f in STATIC_FRAMEWORKS for f in fw))
+                 and not dbs)
+
+    if is_static:
+        return {
+            "target": "s3-cloudfront", "hosting_model": "static",
+            "why": "Static front-end build, no server process or DB. S3 + CloudFront is cheapest correct.",
+            "est_monthly_usd": 3, "instance_class": None, "required_ram_mb": None,
+            "managed_db": None, "warnings": warnings, "provisioning_caveats": [PROVISIONING_CAVEATS[0]],
+            "next_steps": ["Find build command + output dir (dist/ or build/)",
+                           "Create S3 bucket, upload build, front with CloudFront",
+                           "Connect domain via Route 53 / ACM (cert in us-east-1)"],
+        }
+
+    # Server process → size a VM to memory (learnings 3 & 7: VM beats container
+    # for a single warm process — Lightsail container large is ~2x the VM price).
+    required_mb, basis = estimate_required_ram_mb(facts)
+    ram, cls, usd = _pick_bundle(required_mb)
+
+    managed_db = None
+    db_persist = [d for d in dbs if d in {"postgres", "mysql", "mongodb"}]
+    if db_persist:
+        managed_db = db_persist[0]
+        next_steps.append(f"Provision managed {managed_db} (~$15/mo) or in-container for MVP")
+    if "redis" in dbs:
+        warnings.append("Needs Redis — in-container for MVP; ElastiCache later.")
+    if "java" in runtimes and not facts.get("jvm_heap_mb") and not (facts.get("deploy_docs") or {}).get("ram_mb"):
+        warnings.append("JVM app with no heap flag or RAM doc found — RAM estimate is a guess; verify.")
+    if len(runtimes) > 1:
+        warnings.append(f"Polyglot stack {runtimes} — build needs all toolchains "
+                        f"(entrypoint: {facts.get('entrypoint_runtime') or 'unknown'}).")
+    if not facts.get("has_dockerfile"):
+        warnings.append("No Dockerfile — generate one or build natively on the box.")
+
+    for m in (facts.get("unresolved_imports") or [])[:5]:
+        warnings.append(f"Unresolved import {m['import']} in {m['file']} — will FAIL the build "
+                        f"(check the right branch / a file may be uncommitted).")
+
+    est = usd + (15 if managed_db else 0)
+    return {
+        "target": "lightsail-vm", "hosting_model": "vm",
+        "why": f"Long-running server process needing ~{required_mb}MB RAM ({basis}). "
+               f"Lightsail VM '{cls}' ({ram}MB) is the cheapest correct fit — and ~half the "
+               f"price of an equivalent container service for a single warm process.",
+        "est_monthly_usd": est, "instance_class": cls, "required_ram_mb": required_mb,
+        "ram_basis": basis, "managed_db": managed_db, "warnings": warnings,
+        "provisioning_caveats": PROVISIONING_CAVEATS,
+        "next_steps": next_steps + [
+            f"Detected port: {facts.get('port') or 'unknown — find EXPOSE/listen'}",
+            f"Provision Lightsail VM ({cls}, ~${usd}/mo), build on box or push image",
+            "systemd unit + Caddy auto-TLS reverse proxy", "Connect domain + warmup",
+        ],
+    }
+
+
+# ---- repo scanner --------------------------------------------------------
+
+def _read_deps(path, language):
+    deps = []
+    try:
+        if language == "node":
+            with open(os.path.join(path, "package.json")) as f:
+                pkg = json.load(f)
+            for key in ("dependencies", "devDependencies"):
+                deps += list(pkg.get(key, {}).keys())
+        elif language == "python":
+            for fn in ("requirements.txt", "pyproject.toml", "Pipfile"):
+                fp = os.path.join(path, fn)
+                if os.path.exists(fp):
+                    with open(fp, errors="ignore") as f:
+                        deps += re.findall(r"[A-Za-z0-9_\-]+", f.read())
+        elif language == "java":
+            for fn in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                fp = os.path.join(path, fn)
+                if os.path.exists(fp):
+                    with open(fp, errors="ignore") as f:
+                        deps += re.findall(r"[A-Za-z0-9_\-\.]+", f.read())
+    except Exception:
+        pass
+    return deps
+
+
+def scan_repo(path):
+    files = set(os.listdir(path))
+    if os.path.isdir(os.path.join(path, "prisma")) and \
+       "schema.prisma" in os.listdir(os.path.join(path, "prisma")):
+        files.add("schema.prisma")
+
+    # primary language by marker order
+    language = "unknown"
+    for lang, markers in LANG_MARKERS.items():
+        if any(m in files for m in markers):
+            language = lang
+            break
+
+    deps = _read_deps(path, language)
+    frameworks = detect_frameworks(deps)
+    databases = detect_databases(deps, files)
+
+    # all language markers present → polyglot runtime set
+    runtimes = [lang for lang, markers in LANG_MARKERS.items()
+                if any(m in files for m in markers)]
+
+    docker = {}
+    if "Dockerfile" in files:
+        with open(os.path.join(path, "Dockerfile"), errors="ignore") as f:
+            docker = parse_dockerfile(f.read())
+        for rt in docker.get("runtimes", []):
+            if rt not in runtimes:
+                runtimes.append(rt)
+
+    deploy_docs = parse_deploy_docs(path)
+    entrypoint = docker.get("entrypoint_runtime")
+    has_server = bool(entrypoint) or any(f in SERVER_FRAMEWORKS for f in frameworks) or \
+        (language in {"java", "go", "ruby", "php"}) or \
+        (language in {"node", "python"} and not (frameworks and all(f in STATIC_FRAMEWORKS for f in frameworks)))
+    # pure static SPA?
+    if frameworks and all(f in STATIC_FRAMEWORKS for f in frameworks) and not databases and not entrypoint:
+        has_server = False
+
+    return {
+        "language": language,
+        "runtimes": runtimes or ([language] if language != "unknown" else []),
+        "frameworks": frameworks,
+        "databases": databases,
+        "has_dockerfile": "Dockerfile" in files,
+        "has_server": has_server,
+        "entrypoint_runtime": entrypoint,
+        "port": docker.get("port") or _detect_listen_port(path),
+        "jvm_heap_mb": docker.get("jvm_heap_mb"),
+        "deploy_docs": deploy_docs,
+        "unresolved_imports": check_unresolved_imports(path),
+        "env_hint": "see .env.example" if ".env.example" in files else None,
+    }
+
+
+def _detect_listen_port(path):
+    df = os.path.join(path, "Dockerfile")
+    if os.path.exists(df):
+        with open(df, errors="ignore") as f:
+            m = re.search(r"EXPOSE\s+(\d+)", f.read())
+            if m:
+                return int(m.group(1))
+    return None
+
+
+# ---- cli -----------------------------------------------------------------
+
+def _clone_if_url(target):
+    if target.startswith(("http://", "https://", "git@")):
+        tmp = tempfile.mkdtemp(prefix="concierge-")
+        print(f"Cloning {target} -> {tmp} ...", file=sys.stderr)
+        subprocess.run(["git", "clone", "--depth", "1", target, tmp], check=True)
+        return tmp
+    return target
+
+
+def main(argv):
+    if len(argv) < 2:
+        print("usage: analyze.py <github-url | local-path>", file=sys.stderr)
+        return 2
+    path = _clone_if_url(argv[1])
+    facts = scan_repo(path)
+    plan = recommend_target(facts)
+    print(json.dumps({"source": argv[1], "facts": facts, "plan": plan}, indent=2))
+
+    p, fct = plan, facts
+    e = sys.stderr
+    print("\n" + "=" * 64, file=e)
+    print(f"  STACK    : {fct['language']} | runtimes: {', '.join(fct['runtimes'])}"
+          + (f" (entry: {fct['entrypoint_runtime']})" if fct.get('entrypoint_runtime') else ""), file=e)
+    print(f"  DATABASE : {', '.join(fct['databases']) or 'none'}", file=e)
+    if fct.get("deploy_docs"):
+        print(f"  SPEC     : {fct['deploy_docs']}", file=e)
+    print(f"  TARGET   : {p['target']}"
+          + (f"  [{p['instance_class']}, ~{p['required_ram_mb']}MB]" if p.get('instance_class') else "")
+          + f"  (~${p['est_monthly_usd']}/mo)", file=e)
+    if p.get("ram_basis"):
+        print(f"  SIZED BY : {p['ram_basis']}", file=e)
+    if p["warnings"]:
+        print("  WARNINGS :", file=e)
+        for w in p["warnings"]:
+            print(f"     ! {w}", file=e)
+    print("  NEXT     :", file=e)
+    for s in p["next_steps"]:
+        print(f"     -> {s}", file=e)
+    print("  PROVISIONING CAVEATS (platform must handle, not the analyzer):", file=e)
+    for c in p.get("provisioning_caveats", []):
+        print(f"     * {c}", file=e)
+    print("=" * 64, file=e)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

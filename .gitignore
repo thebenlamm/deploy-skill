@@ -1,0 +1,7 @@
+*.pem
+*.key
+secrets.env
+keyerr.txt
+__pycache__/
+*.pyc
+deploys/[0-9]*
