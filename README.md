@@ -88,12 +88,15 @@ warnings too; SKILL.md carries the full guidance:
 - **`NEXT_PUBLIC_*` is build-time inlined** → you must know the public host *before* `next build`.
 - **Migration drift is silent.** "`migrate` succeeded" ≠ "schema matches code"; an orphan
   `.sql` missing from drizzle `meta/_journal.json` is skipped and breaks runtime inserts.
-  Sanity-check that the columns the app writes actually exist.
-- **`.env.example` secrets aren't surfaced** by the analyzer — read it yourself for required keys.
+  `doctor.py --repo` flags orphans; still sanity-check the columns the app writes exist.
+- **`.env.example` secrets** — `doctor.py --repo` lists required keys (and the analyzer flags
+  `NEXT_PUBLIC_*`); supplying real values is still on you.
 
-> These are written down rather than fixed because this is a maintained tool, not an active
-> project. If you fold one into `analyze.py` with a test, log it (see the template's
-> "folded into analyzer?" gate) so the capability compounds instead of staying a checklist.
+> Each of these now has at least a mechanized *detector* (analyzer warning or `doctor.py`
+> check) — detection isn't resolution: the judgment calls (BYOC repointing, choosing swap
+> size, supplying keys) stay with the operator. If a future deploy surfaces a new gap, fold
+> it into `analyze.py`/`doctor.py` with a test (see the template's "folded into analyzer?"
+> gate) so the capability compounds instead of staying a checklist.
 
 ## Contributing
 
