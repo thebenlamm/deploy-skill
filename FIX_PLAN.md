@@ -1,5 +1,11 @@
 # Fix Plan — 2026-07-18 review
 
+> **Execution status (2026-07-18):** Phases 1–3 + C1–C3 DONE — scope: all rows
+> A1–A5, S1–S7, D1–D4, C1–C3, verified by 32/32 analyzer tests + e2e fixture runs
+> (SvelteKit-SSR → vm, monorepo → vm+warning). Commits `dedfb2a..60b7738` + CHANGELOG
+> 0.3.0. **Still open:** C4–C7 (journalctl, redeploy runbook, swap recipe, unit polish)
+> and Phase 5 (E1–E4: exit-code contract, detection polish, doctor.py, audit.py).
+
 Findings from a 4-lens review (correctness, security, infra/ops, skill-design), all
 verified against code; analyzer P0s were confirmed by execution. Ordered by blast
 radius: money → security → data integrity → config → ergonomics.
