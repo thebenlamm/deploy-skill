@@ -20,6 +20,13 @@ Run long builds with `run_in_background: true` and tee to `~/provision.log`.
 
 Common base: `sudo apt-get update -y && sudo apt-get install -y git curl ca-certificates fail2ban unattended-upgrades`.
 
+Boxes <4GB RAM: add swap before any frontend build — next/vite/webpack builds
+routinely OOM a small box (the analyzer's warning), and this is the cheap fix:
+```
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile \
+  && sudo swapon /swapfile && echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
 ---
 
 ## static (S3 alternative: just serve via Caddy)
@@ -49,7 +56,9 @@ Run: `ExecStart=/srv/<APP>/.venv/bin/gunicorn -b 127.0.0.1:3000 <module>:app`
 
 ## java (maven / spring)
 ```
-sudo apt-get install -y openjdk-17-jdk maven      # match the version in pom.xml
+V=$(grep -oE '<(java.version|maven.compiler.(source|release))>[0-9]+' pom.xml \
+  | grep -oE '[0-9]+$' | head -1)
+sudo apt-get install -y openjdk-${V:-21}-jdk maven   # 24.04's default JDK is 21
 cd /srv/<APP> && mvn -q -DskipTests package        # or install
 ```
 Run: `ExecStart=/usr/bin/java -Xmx<heap>g -jar /srv/<APP>/target/<artifact>.jar`.
@@ -75,6 +84,9 @@ texts dir, `*_JAVA_OPTS=-Xmx4g`, admin token from `secrets.env`).
 2. `sudo systemctl status <APP>` — confirm `active (running)` + "Listening on …".
 3. Install Caddy (provisioning.md §4), then verify `curl https://<host>/healthz`.
 4. Run any documented warmup (e.g. `POST /api/.../warmup`) to absorb cold start.
+5. `journalctl -u <APP> -e --no-pager` — read the actual startup log, don't just
+   trust `active (running)`. `journalctl -u caddy -e --no-pager` if the cert/TLS
+   handshake looks wrong.
 
 ## If the build fails
 - Unresolved import / missing file → likely the wrong branch. Ask which branch is
@@ -82,3 +94,31 @@ texts dir, `*_JAVA_OPTS=-Xmx4g`, admin token from `secrets.env`).
 - OOM during build (big data / JVM) → check `free -h`; the box may be undersized vs the
   analyzer's RAM estimate, or the build needs more than runtime (regen steps).
 - Case-sensitive import works on Mac, fails on Linux → real filename casing differs.
+- Service won't start / crashes on boot → `journalctl -u <APP> -e --no-pager` for the
+  real stack trace; `journalctl -u caddy -e --no-pager` for cert-issuance failures.
+
+## Redeploy (update an existing deploy)
+Do NOT create a second instance to push an update — reuse the box from the
+original deploy's `state.json`.
+
+Optional, before a risky change: snapshot the instance so you can roll back.
+```
+aws lightsail create-instance-snapshot --region $REGION \
+  --instance-name <APP> --instance-snapshot-name <APP>-$(date +%Y%m%d%H%M)
+```
+
+Sequence:
+1. `ssh -i <KEY.pem> ubuntu@$IP 'sudo systemctl stop <APP>'` — the live tar-over
+   does `rm -rf /srv/<APP>/*`, which is only safe once nothing is running out of
+   that directory.
+2. Re-tar-pipe from the local clone (possibly a different branch/commit than the
+   original deploy) into `/srv/<APP>`, same command as the first deploy.
+3. Rebuild per the stack recipe above.
+4. If the app has DB migrations, run them now — and re-check migration-vs-code
+   drift the same way you did on the first deploy.
+5. `ssh -i <KEY.pem> ubuntu@$IP 'sudo systemctl start <APP>'`
+6. Verify like a user again (provisioning.md §5) — a redeploy that starts is not
+   a redeploy that works.
+
+`NEXT_PUBLIC_*` and other build-time env still gets inlined on every rebuild —
+know the host/config before you run `npm run build` again, not after.

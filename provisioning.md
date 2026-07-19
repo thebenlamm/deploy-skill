@@ -23,11 +23,16 @@ printf '*.pem\n*.key\nsecrets.env\nkeyerr.txt\n' > "$D/.gitignore"
 
 aws lightsail create-key-pair --region $REGION --key-pair-name <APP>-key \
   --query privateKeyBase64 --output text > "$D/<APP>-key.pem" && chmod 600 "$D/<APP>-key.pem"
+# Guard: an API error message ("already exists" etc.) can land in the .pem
+# instead of a key — verify before trusting it.
+grep -q 'PRIVATE KEY' "$D/<APP>-key.pem" || { echo "key-pair create failed (already exists?)"; exit 1; }
 
 aws lightsail create-instances --region $REGION --instance-names <APP> \
   --availability-zone ${REGION}a --blueprint-id ubuntu_24_04 \
   --bundle-id <SIZE-BUNDLE> --key-pair-name <APP>-key \
   --tags key=managed-by,value=deploy-concierge
+# If create fails on ${REGION}a (capacity/AZ issue), list valid zones and retry
+# with one of them: aws lightsail get-regions --include-availability-zones
 
 # Static IP: without it the address changes on stop/start, killing the
 # sslip.io URL + cert.
@@ -38,8 +43,12 @@ aws lightsail attach-static-ip --region $REGION --static-ip-name <APP>-ip \
 
 ## 2. Wait → open ports → get IP
 ```
-until [ "$(aws lightsail get-instance-state --region $REGION --instance-name <APP> \
-  --query state.name --output text)" = running ]; do sleep 6; done
+for i in $(seq 1 50); do
+  [ "$(aws lightsail get-instance-state --region $REGION --instance-name <APP> \
+    --query state.name --output text)" = running ] && break
+  sleep 6
+  [ "$i" = 50 ] && { echo "instance never reached 'running' after 5min — check the console"; exit 1; }
+done
 
 # Port 22 restricted to the operator's current IP; re-run this line if your IP
 # changes. 80/443 stay open to the world.
@@ -90,7 +99,9 @@ non-secrets only (PORT etc.) — secrets load via `EnvironmentFile=`. Mirror
 every runtime `ENV` from the Dockerfile. Pin JVM heap: `-Xmx` ≈ box RAM − 2GB.
 ```
 [Unit]
+Description=<APP> (deploy-skill)
 After=network.target
+# add After=postgresql.service if the DB runs on-box
 [Service]
 Type=simple
 User=app
@@ -103,7 +114,8 @@ Environment=PORT=3000
 # ...one Environment= line per non-secret runtime var...
 EnvironmentFile=-/etc/<APP>/secrets.env
 ExecStart=<RUN_CMD>
-Restart=on-failure
+Restart=always
+# always, not on-failure: apps that exit 0 on crash would otherwise escape restart
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
@@ -120,6 +132,8 @@ curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
 sudo apt-get update -y && sudo apt-get install -y caddy
 
 HOST="${IP//./-}.sslip.io"          # IP carried from step 2, NOT from metadata
+# sslip.io is a free third-party resolver with no SLA — demo-grade; move to a
+# real domain (see "Real domain" below) for anything lasting.
 printf '%s {\n    reverse_proxy 127.0.0.1:3000\n}\n' "$HOST" | sudo tee /etc/caddy/Caddyfile
 sudo systemctl restart caddy
 echo "PUBLIC_URL=https://${HOST}"
