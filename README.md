@@ -29,6 +29,9 @@ Generic "deploy my repo" advice reaches for EC2 + Docker + CloudFront — more e
 | `SKILL.md` | The flow, the 3 judgment gates, the gotchas. Claude reads this. |
 | `analyze.py` | Dependency-free repo analyzer: detects stack (incl. polyglot), reads deploy-intent docs, sizes to memory, recommends a Lightsail VM + cost, flags broken imports. |
 | `test_analyze.py` | Tests for the analyzer (`python3 test_analyze.py`). |
+| `doctor.py` | Mechanized "verify like a user": exit 4 if the primary surface is empty; finds pipeline scripts, orphan drizzle migrations, required env keys. |
+| `audit.py` | Cost sweep across `deploys/*/state.json`; `--live` reconciles vs AWS and emits teardown commands for forgotten boxes (only ones this skill created). |
+| `test_doctor.py` | Tests for doctor + audit (`python3 test_doctor.py`). |
 | `provisioning.md` | Copy-paste Lightsail command sequence + systemd/Caddy templates. |
 | `build-recipes.md` | Native build-on-box recipes per stack (static / node / python / java / node+jvm). |
 | `deploys/_TEMPLATE.md` | Per-deploy friction log — the feedback loop that improves the skill. |

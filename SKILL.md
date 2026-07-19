@@ -61,7 +61,10 @@ a Claude skill that's `~/.claude/skills/deploy/`; call it `<SKILL_DIR>` below.
 > (Real miss: declared a deploy "full stack working" on a 200 + 8 seeded venues while the
 > actual event feed was empty. The user had to ask "aren't there scripts to pull data?")
 
-Before claiming done, run this — proactively, every deploy:
+Before claiming done, run this — proactively, every deploy. Start with the
+mechanized check: `python3 <SKILL_DIR>/doctor.py <state.json|url> --repo <clone> --api <content-path>`
+— exit 4 means the primary surface looks empty (NOT done); it also lists pipeline
+scripts, orphan drizzle migrations, and required env keys. Then:
 
 1. **Find the app's primary content** — the feed, listings, dashboard data. Load it as a user
    would (`curl https://<host>/` and the main content API). If it's empty, you are NOT done.
@@ -126,6 +129,13 @@ accounts cleanly — drive Lightsail through the local profile.
 
 ## Quick reference
 
-- Analyzer: `analyze.py <url>` → JSON plan + human summary on stderr. Tests: `python3 test_analyze.py`.
+- Analyzer: `analyze.py [--json-only] <url>` → JSON plan (incl. a prefilled `gates` array
+  for AskUserQuestion) + human summary on stderr. Exit codes: 0 clean · 3 warnings (plan
+  still usable — read them) · 1 clone/scan failure · 2 usage. Tests: `python3 test_analyze.py`.
+- Verify: `doctor.py <state.json|url> [--repo <clone>] [--api <path>]` → exit 4 = primary
+  surface empty (deploy NOT done); finds pipeline scripts + orphan migrations + env keys.
+- Cost sweep: `audit.py [--live]` → tracked deploys + $/mo from `deploys/*/state.json`;
+  `--live` reconciles vs AWS and emits teardown commands for forgotten (tagged) boxes.
+  Tests for both: `python3 test_doctor.py`.
 - Provisioning command sequence + systemd/Caddy templates: **`provisioning.md`**.
 - Per-stack build-on-box recipes (static / node / python / java-maven / node+jvm): **`build-recipes.md`**.
