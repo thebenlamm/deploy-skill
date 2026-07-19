@@ -282,6 +282,24 @@ def test_rust_language_no_frameworks_goes_to_vm():
     assert rec["hosting_model"] == "vm"
 
 
+PYPROJECT_WITH_PROSE_DESCRIPTION = """
+[project]
+name = "demo"
+description = "sync GPG keys to a mongo-style store"
+dependencies = ["flask"]
+"""
+
+def test_pyproject_prose_description_not_tokenized_as_deps():
+    """Whole-file tokenizing turned prose ('mongo-style') into a phantom
+    mongodb dependency — only the dependencies = [...] array counts."""
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "pyproject.toml"), "w") as f:
+        f.write(PYPROJECT_WITH_PROSE_DESCRIPTION)
+    facts = analyze.scan_repo(d)
+    assert facts["databases"] == []
+    assert "flask" in facts["frameworks"]
+
+
 def test_scan_repo_polyglot_node_java():
     d = tempfile.mkdtemp()
     with open(os.path.join(d, "package.json"), "w") as f:

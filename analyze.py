@@ -402,6 +402,83 @@ def recommend_target(facts):
 
 # ---- repo scanner --------------------------------------------------------
 
+_DEP_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
+def _parse_requirements_txt(text):
+    """Per requirement line only — prose elsewhere in the repo never runs
+    through this. Strip comments, skip -r/--flags and raw URLs, stop the
+    name at the first version/extras specifier."""
+    deps = []
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith(("-", "http://", "https://", "git+")):
+            continue
+        m = _DEP_NAME_RE.match(line)
+        if m:
+            deps.append(m.group(0))
+    return deps
+
+
+def _quoted_dep_names(array_body):
+    names = []
+    for s in re.findall(r'["\']([^"\']+)["\']', array_body):
+        m = _DEP_NAME_RE.match(s.strip())
+        if m:
+            names.append(m.group(0))
+    return names
+
+
+def _parse_pyproject_toml(text):
+    """HIGH PRECISION over recall: only the `dependencies = [...]` array (PEP
+    621, [project] table) and arrays under [project.optional-dependencies] —
+    a prose `description` field ('mongo-style store') used to whole-file
+    tokenize into a phantom mongodb dependency."""
+    deps = []
+    m = re.search(r"^\s*dependencies\s*=\s*\[(.*?)\]", text, re.S | re.M)
+    if m:
+        deps += _quoted_dep_names(m.group(1))
+    sec = re.search(r"\[project\.optional-dependencies\](.*?)(?=\n\[|\Z)", text, re.S)
+    if sec:
+        for arr in re.finditer(r"=\s*\[(.*?)\]", sec.group(1), re.S):
+            deps += _quoted_dep_names(arr.group(1))
+    return deps
+
+
+def _parse_pipfile(text):
+    """Section-aware just enough to avoid whole-file tokenizing: only simple
+    `name = "..."` lines directly under [packages]/[dev-packages]; nested
+    tables (e.g. [packages.requests]) are skipped rather than guessed at."""
+    deps = []
+    section = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line.strip("[]")
+            continue
+        if section in ("packages", "dev-packages"):
+            m = re.match(r"^([A-Za-z0-9_.\-]+)\s*=", line)
+            if m:
+                deps.append(m.group(1))
+    return deps
+
+
+def _parse_pom_xml(text):
+    return re.findall(r"<artifactId>\s*([^<\s]+)\s*</artifactId>", text)
+
+
+def _parse_gradle(text):
+    """Quoted 'group:artifact:version' coordinates only — take the artifact
+    segment, not every identifier in the build script."""
+    deps = []
+    for m in re.finditer(r'''["']([\w.\-]+:[\w.\-]+:[\w.\-\[\]()+,]+)["']''', text):
+        parts = m.group(1).split(":")
+        if len(parts) >= 2:
+            deps.append(parts[1])
+    return deps
+
+
 def _read_deps(path, language):
     deps = []
     try:
@@ -411,17 +488,21 @@ def _read_deps(path, language):
             for key in ("dependencies", "devDependencies"):
                 deps += list(pkg.get(key, {}).keys())
         elif language == "python":
-            for fn in ("requirements.txt", "pyproject.toml", "Pipfile"):
+            for fn, parser in (("requirements.txt", _parse_requirements_txt),
+                                ("pyproject.toml", _parse_pyproject_toml),
+                                ("Pipfile", _parse_pipfile)):
                 fp = os.path.join(path, fn)
                 if os.path.exists(fp):
                     with open(fp, errors="ignore") as f:
-                        deps += re.findall(r"[A-Za-z0-9_\-]+", f.read())
+                        deps += parser(f.read())
         elif language == "java":
-            for fn in ("pom.xml", "build.gradle", "build.gradle.kts"):
+            for fn, parser in (("pom.xml", _parse_pom_xml),
+                                ("build.gradle", _parse_gradle),
+                                ("build.gradle.kts", _parse_gradle)):
                 fp = os.path.join(path, fn)
                 if os.path.exists(fp):
                     with open(fp, errors="ignore") as f:
-                        deps += re.findall(r"[A-Za-z0-9_\-\.]+", f.read())
+                        deps += parser(f.read())
     except Exception:
         pass
     return deps
