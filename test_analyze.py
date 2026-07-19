@@ -185,6 +185,39 @@ def test_plan_surfaces_provisioning_caveats():
 # Integration — full scan of a Parshandata-shaped repo
 # ====================================================================
 
+def test_sveltekit_ssr_is_not_static():
+    """SvelteKit is an SSR server framework, not a static-site generator like
+    plain svelte — the substring match used to fold '@sveltejs/kit' into
+    static 'svelte' and wrongly ship it to S3."""
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"@sveltejs/kit": "^2", "svelte": "^4", "vite": "^5"}}, f)
+    facts = analyze.scan_repo(d)
+    rec = analyze.recommend_target(facts)
+    assert rec["hosting_model"] == "vm"
+
+
+def test_monorepo_shaped_repo_with_only_readme_defaults_to_vm_with_warning():
+    """No language marker, no frameworks (e.g. a monorepo where only the
+    top-level README got scanned) is NOT positive static evidence — default
+    to VM and warn, never s3-cloudfront."""
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "README.md"), "w") as f:
+        f.write("# monorepo\nSee packages/ for the actual services.\n")
+    facts = analyze.scan_repo(d)
+    rec = analyze.recommend_target(facts)
+    assert rec["target"] == "lightsail-vm"
+    blob = " ".join(rec["warnings"]).lower()
+    assert "monorepo" in blob and "verify" in blob
+
+
+def test_rust_language_no_frameworks_goes_to_vm():
+    facts = {"language": "rust", "frameworks": [], "runtimes": ["rust"],
+             "databases": [], "has_dockerfile": False}
+    rec = analyze.recommend_target(facts)
+    assert rec["hosting_model"] == "vm"
+
+
 def test_scan_repo_polyglot_node_java():
     d = tempfile.mkdtemp()
     with open(os.path.join(d, "package.json"), "w") as f:

@@ -47,8 +47,16 @@ SERVER_FRAMEWORKS = {
     "express", "fastify", "koa", "nestjs", "@nestjs/core", "next", "nuxt",
     "flask", "fastapi", "django", "gunicorn", "uvicorn",
     "spring", "spring-boot", "quarkus", "rails", "sinatra", "laravel",
+    "sveltekit", "astro", "remix",
 }
 STATIC_FRAMEWORKS = {"react", "vue", "vite", "svelte", "angular"}
+
+# Checked BEFORE the generic FRAMEWORK_SIGNALS loop: "@sveltejs/kit".lower()
+# contains "svelte", so the generic substring match folded it into static
+# "svelte" and shipped an SSR app to S3 (deploy risk — A1).
+_EXPLICIT_FRAMEWORK_SIGNALS = [
+    ("@sveltejs/kit", "sveltekit"), ("astro", "astro"), ("@remix-run", "remix"),
+]
 
 # Lightsail Linux VM bundles (approx monthly USD, 2-vCPU gen). The analyzer
 # *estimates*; provisioning confirms the exact price via the API. (ram_mb, class, usd)
@@ -88,6 +96,15 @@ def detect_frameworks(deps):
     found = []
     for dep in deps:
         low = dep.lower()
+        matched = False
+        for sig, name in _EXPLICIT_FRAMEWORK_SIGNALS:
+            if sig in low:
+                if name not in found:
+                    found.append(name)
+                matched = True
+                break
+        if matched:
+            continue
         for sig in FRAMEWORK_SIGNALS:
             if sig in low and sig not in found:
                 found.append(sig)
@@ -297,9 +314,12 @@ def recommend_target(facts):
     runtimes = facts.get("runtimes") or ([facts["language"]] if facts.get("language") else [])
     warnings, next_steps = [], []
 
-    is_static = (not facts.get("has_server", True)
-                 and (not fw or all(f in STATIC_FRAMEWORKS for f in fw))
-                 and not dbs)
+    # POSITIVE evidence only — an unknown language or no detected frameworks is
+    # an absence of signal, not evidence of "static". Deploy #1 friction: a
+    # monorepo top-level scan with no markers used to "confidently" ship s3.
+    known_lang = facts.get("language") not in (None, "unknown")
+    is_static = (known_lang and bool(fw) and all(f in STATIC_FRAMEWORKS for f in fw)
+                 and not dbs and not facts.get("has_server", True))
 
     if is_static:
         return {
@@ -311,6 +331,11 @@ def recommend_target(facts):
                            "Create S3 bucket, upload build, front with CloudFront",
                            "Connect domain via Route 53 / ACM (cert in us-east-1)"],
         }
+
+    if not known_lang or not fw:
+        warnings.append("No positive static evidence (unknown language / no frameworks "
+                        "detected) — defaulting to VM; verify manually. Monorepo? Only "
+                        "the repo root is scanned.")
 
     # Server process → size a VM to memory (learnings 3 & 7: VM beats container
     # for a single warm process — Lightsail container large is ~2x the VM price).
@@ -412,7 +437,7 @@ def scan_repo(path):
     deploy_docs = parse_deploy_docs(path)
     entrypoint = docker.get("entrypoint_runtime")
     has_server = bool(entrypoint) or any(f in SERVER_FRAMEWORKS for f in frameworks) or \
-        (language in {"java", "go", "ruby", "php"}) or \
+        (language in {"java", "go", "ruby", "php", "rust"}) or \
         (language in {"node", "python"} and not (frameworks and all(f in STATIC_FRAMEWORKS for f in frameworks)))
     # pure static SPA?
     if frameworks and all(f in STATIC_FRAMEWORKS for f in frameworks) and not databases and not entrypoint:
