@@ -1,49 +1,58 @@
 # Build-on-box recipes (native, no Docker)
 
-Pick by the analyzer's detected stack. All run as `ubuntu` on a fresh Ubuntu 24.04
-Lightsail box. **Ship source by tar-piping the operator's local clone** (the box
-has no GitHub creds for private repos):
+Pick by the analyzer's detected stack. Builds run as `ubuntu` on a fresh Ubuntu
+24.04 Lightsail box, extracted to `/srv/<APP>` (never `~/<APP>` — the app
+service itself runs as a dedicated `app` user, and `/srv` avoids 0750-home
+traversal problems for Caddy). **Ship source by tar-piping the operator's
+local clone** (the box has no GitHub creds for private repos):
 ```
-tar czf - -C <LOCAL_CLONE> --exclude='./.git' . \
-  | ssh -i <KEY.pem> ubuntu@$IP 'rm -rf ~/<APP> && mkdir -p ~/<APP> && tar xzf - -C ~/<APP>'
+ssh -i <KEY.pem> ubuntu@$IP 'sudo mkdir -p /srv/<APP> && sudo chown ubuntu:ubuntu /srv/<APP>'
+tar czf - -C <LOCAL_CLONE> --exclude='./.git' --exclude='./.env*' \
+  --exclude='./*.pem' --exclude='./secrets*' --exclude='./.aws' \
+  --exclude='./node_modules' . \
+  | ssh -i <KEY.pem> ubuntu@$IP 'rm -rf /srv/<APP>/* && tar xzf - -C /srv/<APP>'
 ```
+For tracked-files-only shipping (cleaner, no denylist needed), use
+`git archive HEAD | ssh -i <KEY.pem> ubuntu@$IP 'tar xf - -C /srv/<APP>'` instead.
+
 Then SSH in, install the toolchain, build, wire the systemd `ExecStart` + `WorkingDirectory`.
 Run long builds with `run_in_background: true` and tee to `~/provision.log`.
 
-Common base: `sudo apt-get update -y && sudo apt-get install -y git curl ca-certificates`.
+Common base: `sudo apt-get update -y && sudo apt-get install -y git curl ca-certificates fail2ban unattended-upgrades`.
 
 ---
 
 ## static (S3 alternative: just serve via Caddy)
 If analyzer says `s3-cloudfront`, prefer S3+CloudFront. But on a box you already
-have, simplest is Caddy serving the build dir:
+have, simplest is Caddy serving the build dir. Never `file_server` the app
+ROOT — serve only the build output dir:
 ```
-cd ~/<APP> && npm ci && npm run build      # output dist/ or build/
+cd /srv/<APP> && npm ci && npm run build      # output dist/ or build/
 ```
-Caddyfile: `root * ~/<APP>/dist` + `file_server` instead of reverse_proxy.
+Caddyfile: `root * /srv/<APP>/dist` + `file_server` instead of reverse_proxy.
 
 ## node (server: express/fastify/nest/sveltekit-node)
 ```
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
-cd ~/<APP> && npm ci && npm run build 2>/dev/null || true
+cd /srv/<APP> && npm ci && npm run build --if-present
 ```
 Run: `ExecStart=/usr/bin/node <entry>` (e.g. `build` for SvelteKit node adapter,
-or `dist/main.js`, `server.js`). `WorkingDirectory` = app root or `frontend/`.
+or `dist/main.js`, `server.js`). `WorkingDirectory` = `/srv/<APP>` or `/srv/<APP>/frontend`.
 
 ## python (flask/fastapi/django)
 ```
 sudo apt-get install -y python3 python3-venv python3-pip
-cd ~/<APP> && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+cd /srv/<APP> && python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
 ```
-Run: `ExecStart=~/<APP>/.venv/bin/gunicorn -b 127.0.0.1:3000 <module>:app`
+Run: `ExecStart=/srv/<APP>/.venv/bin/gunicorn -b 127.0.0.1:3000 <module>:app`
 (FastAPI: `uvicorn <module>:app --port 3000`).
 
 ## java (maven / spring)
 ```
 sudo apt-get install -y openjdk-17-jdk maven      # match the version in pom.xml
-cd ~/<APP> && mvn -q -DskipTests package           # or install
+cd /srv/<APP> && mvn -q -DskipTests package        # or install
 ```
-Run: `ExecStart=/usr/bin/java -Xmx<heap>g -jar ~/<APP>/target/<artifact>.jar`.
+Run: `ExecStart=/usr/bin/java -Xmx<heap>g -jar /srv/<APP>/target/<artifact>.jar`.
 Pin `-Xmx` to box RAM − 2GB.
 
 ## node + jvm polyglot (the proven Parshandata shape)
@@ -52,10 +61,10 @@ which spawns the JVM worker:
 ```
 sudo apt-get install -y openjdk-17-jdk maven
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
-cd ~/<APP> && mvn -q -DskipTests install
-cd ~/<APP>/frontend-new && npm ci && <DEPLOY_TARGET_ENV> npm run build
+cd /srv/<APP> && mvn -q -DskipTests install
+cd /srv/<APP>/frontend-new && npm ci && <DEPLOY_TARGET_ENV> npm run build
 ```
-Run: `ExecStart=/usr/bin/node build`, `WorkingDirectory=~/<APP>/frontend-new`.
+Run: `ExecStart=/usr/bin/node build`, `WorkingDirectory=/srv/<APP>/frontend-new`.
 Mirror every runtime `ENV` from the Dockerfile into the systemd unit (classes dirs,
 texts dir, `*_JAVA_OPTS=-Xmx4g`, admin token from `secrets.env`).
 
