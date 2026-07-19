@@ -29,6 +29,44 @@ def test_detect_databases_from_deps():
     assert "postgres" in dbs and "redis" in dbs
 
 
+def test_detect_databases_token_match_no_false_positive():
+    """Substring matching folded 'openpgp' and 'gpg-lite' into postgres via
+    the 'pg' signal — token-boundary matching must not."""
+    assert analyze.detect_databases(["openpgp", "gpg-lite"], set()) == []
+
+
+PRISMA_SCHEMA_SQLITE = """
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+"""
+
+def test_prisma_schema_sqlite_provider_no_managed_db():
+    """schema.prisma presence used to unconditionally add postgres — must
+    read the actual datasource provider instead."""
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "prisma"))
+    with open(os.path.join(d, "prisma", "schema.prisma"), "w") as f:
+        f.write(PRISMA_SCHEMA_SQLITE)
+    facts = analyze.scan_repo(d)
+    assert facts["databases"] == ["sqlite"]
+    rec = analyze.recommend_target(facts)
+    assert rec["managed_db"] is None
+
+def test_prisma_schema_postgresql_provider():
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "prisma"))
+    with open(os.path.join(d, "prisma", "schema.prisma"), "w") as f:
+        f.write(PRISMA_SCHEMA_SQLITE.replace('"sqlite"', '"postgresql"'))
+    facts = analyze.scan_repo(d)
+    assert "postgres" in facts["databases"]
+
+
 def test_detect_frameworks_from_deps():
     assert "next" in analyze.detect_frameworks(["next", "react", "@prisma/client"])
 

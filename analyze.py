@@ -31,10 +31,17 @@ LANG_MARKERS = {
 }
 
 DB_SIGNALS = {
-    "pg": "postgres", "postgres": "postgres", "psycopg": "postgres", "prisma": "postgres",
+    "pg": "postgres", "postgres": "postgres", "psycopg": "postgres", "psycopg2": "postgres",
     "mysql": "mysql", "mysql2": "mysql", "mariadb": "mysql",
     "mongo": "mongodb", "mongoose": "mongodb",
     "redis": "redis", "ioredis": "redis", "sqlite": "sqlite",
+}
+
+# schema.prisma's actual `datasource` provider, not the dep name — see
+# scan_repo. postgresql/cockroachdb both speak the postgres wire protocol.
+PRISMA_PROVIDER_DB = {
+    "postgresql": "postgres", "postgres": "postgres", "mysql": "mysql",
+    "sqlite": "sqlite", "mongodb": "mongodb", "cockroachdb": "postgres",
 }
 
 FRAMEWORK_SIGNALS = [
@@ -81,14 +88,16 @@ PROVISIONING_CAVEATS = [
 # ---- pure detection helpers ----------------------------------------------
 
 def detect_databases(deps, files):
+    """Token-boundary match, not substring — 'openpgp' and 'gpg-lite' both
+    substring-contain 'pg' and were misread as postgres. schema.prisma's
+    actual provider (read in scan_repo) is unioned in by the caller, not
+    guessed here."""
     found = set()
     for dep in deps:
-        low = dep.lower()
+        tokens = set(re.split(r"[^A-Za-z0-9]+", dep.lower()))
         for sig, name in DB_SIGNALS.items():
-            if sig in low:
+            if sig in tokens:
                 found.add(name)
-    if "schema.prisma" in files:
-        found.add("postgres")
     return sorted(found)
 
 
@@ -420,9 +429,21 @@ def _read_deps(path, language):
 
 def scan_repo(path):
     files = set(os.listdir(path))
+    prisma_provider_db = None
+    prisma_schema_fp = os.path.join(path, "prisma", "schema.prisma")
     if os.path.isdir(os.path.join(path, "prisma")) and \
        "schema.prisma" in os.listdir(os.path.join(path, "prisma")):
         files.add("schema.prisma")
+        try:
+            with open(prisma_schema_fp, errors="ignore") as f:
+                schema_text = f.read()
+            m_block = re.search(r"datasource\s+\w+\s*\{([^}]*)\}", schema_text, re.S)
+            if m_block:
+                m = re.search(r'provider\s*=\s*["\'](\w+)', m_block.group(1))
+                if m:
+                    prisma_provider_db = PRISMA_PROVIDER_DB.get(m.group(1).lower())
+        except Exception:
+            pass
 
     # primary language by marker order
     language = "unknown"
@@ -434,6 +455,8 @@ def scan_repo(path):
     deps = _read_deps(path, language)
     frameworks = detect_frameworks(deps)
     databases = detect_databases(deps, files)
+    if prisma_provider_db:
+        databases = sorted(set(databases) | {prisma_provider_db})
 
     # all language markers present → polyglot runtime set
     runtimes = [lang for lang, markers in LANG_MARKERS.items()
