@@ -236,6 +236,54 @@ def test_import_check_ignores_virtual_and_extensionless():
 # LEARNING 4+6 — surfaced as provisioning caveats, not fake-detected
 # ====================================================================
 
+def test_frontend_build_ram_warning_suggests_swap():
+    facts = {"language": "node", "frameworks": ["next"], "runtimes": ["node"],
+             "databases": [], "has_dockerfile": True, "has_server": True,
+             "deploy_docs": {}, "jvm_heap_mb": None, "deps": ["next", "react"]}
+    rec = analyze.recommend_target(facts)
+    blob = " ".join(rec["warnings"]).lower()
+    assert "swap" in blob
+
+
+def test_managed_db_ssl_next_step():
+    facts = {"language": "node", "frameworks": ["express"], "runtimes": ["node"],
+             "databases": ["postgres"], "has_dockerfile": True, "has_server": True,
+             "deploy_docs": {}, "jvm_heap_mb": None}
+    rec = analyze.recommend_target(facts)
+    assert any("sslmode=require" in s for s in rec["next_steps"])
+
+
+def test_next_public_env_vars_flagged():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"next": "^14", "react": "^18"}}, f)
+    with open(os.path.join(d, ".env.example"), "w") as f:
+        f.write("DATABASE_URL=postgres://...\nNEXT_PUBLIC_API_URL=https://api.example.com\n")
+    facts = analyze.scan_repo(d)
+    assert facts["next_public_env"] is True
+    rec = analyze.recommend_target(facts)
+    assert any("NEXT_PUBLIC" in w for w in rec["warnings"])
+
+
+def test_byoc_supabase_dep_flagged():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"express": "^4", "@supabase/supabase-js": "^2"}}, f)
+    facts = analyze.scan_repo(d)
+    assert facts["byoc_platform_sdk"] is True
+    rec = analyze.recommend_target(facts)
+    assert any("BYOC" in w for w in rec["warnings"])
+
+def test_byoc_vercel_json_flagged():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"express": "^4"}}, f)
+    with open(os.path.join(d, "vercel.json"), "w") as f:
+        f.write("{}")
+    facts = analyze.scan_repo(d)
+    assert facts["byoc_platform_sdk"] is True
+
+
 def test_plan_surfaces_provisioning_caveats():
     facts = {"language": "node", "frameworks": ["express"], "runtimes": ["node"],
              "databases": [], "has_dockerfile": True, "has_server": True, "deploy_docs": {}}

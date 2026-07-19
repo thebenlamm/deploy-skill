@@ -369,6 +369,26 @@ def recommend_target(facts):
     if db_persist:
         managed_db = db_persist[0]
         next_steps.append(f"Provision managed {managed_db} (~$15/mo) or in-container for MVP")
+    # D2/D3(b): app code often assumes no SSL against a managed DB.
+    if "postgres" in dbs or "mysql" in dbs:
+        next_steps.append("Managed-DB connection URL needs ?sslmode=require "
+                          "(app code often sets no SSL).")
+    # D2/D3(a): a frontend build (webpack/vite/next/sveltekit) on a small box
+    # OOMs before the app ever runs — the app's own RAM needs are irrelevant.
+    build_deps = {"next", "vite", "webpack", "@sveltejs/kit"}
+    if any(any(bt in d.lower() for bt in build_deps) for d in (facts.get("deps") or [])) \
+       and ram < 4096:
+        warnings.append("Frontend build (next/vite/webpack) can OOM a small box — "
+                        "add 2GB swap before building (see build-recipes.md).")
+    # D2/D3(c)
+    if facts.get("next_public_env"):
+        warnings.append("NEXT_PUBLIC_* vars are inlined at build time — know the "
+                        "public host BEFORE `next build`.")
+    # D2/D3(d)
+    if facts.get("byoc_platform_sdk"):
+        warnings.append("Platform SDK detected (Supabase/Vercel) — check whether it "
+                        "can be repointed at your own Postgres/host (BYOC) before "
+                        "assuming a plain deploy works.")
     if "redis" in dbs:
         warnings.append("Needs Redis — in-container for MVP; ElastiCache later.")
     if "java" in runtimes and not facts.get("jvm_heap_mb") and not (facts.get("deploy_docs") or {}).get("ram_mb"):
@@ -551,6 +571,23 @@ def scan_repo(path):
             if rt not in runtimes:
                 runtimes.append(rt)
 
+    # D2/D3(c): NEXT_PUBLIC_* vars are inlined into the client bundle at
+    # `next build` time — the public host must be known BEFORE building.
+    next_public_env = False
+    env_example_fp = os.path.join(path, ".env.example")
+    if os.path.exists(env_example_fp):
+        try:
+            with open(env_example_fp, errors="ignore") as f:
+                next_public_env = any(l.strip().startswith("NEXT_PUBLIC_") for l in f)
+        except Exception:
+            pass
+
+    # D2/D3(d): a platform SDK (Supabase client, vercel.json) means the app
+    # may assume platform-managed infra that a plain VM/S3 deploy doesn't have.
+    byoc_platform_sdk = any(
+        d.lower() == "supabase" or d.lower().startswith("@supabase/") for d in deps
+    ) or "vercel.json" in files
+
     deploy_docs = parse_deploy_docs(path)
     entrypoint = docker.get("entrypoint_runtime")
     has_server = bool(entrypoint) or any(f in SERVER_FRAMEWORKS for f in frameworks) or \
@@ -573,6 +610,9 @@ def scan_repo(path):
         "deploy_docs": deploy_docs,
         "unresolved_imports": check_unresolved_imports(path),
         "env_hint": "see .env.example" if ".env.example" in files else None,
+        "deps": deps,
+        "next_public_env": next_public_env,
+        "byoc_platform_sdk": byoc_platform_sdk,
     }
 
 
