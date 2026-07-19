@@ -81,6 +81,16 @@ def test_deploy_doc_parse_reads_ram():
     assert hints["ram_mb"] == 6144        # ~6 GB -> 6144
     assert hints["source_file"] == "hosting-spec.md"
 
+def test_ram_regex_word_boundary_no_false_positive():
+    """'Remember' contains the substring 'mem' but not the whole word — must
+    not be mistaken for a RAM context."""
+    assert analyze._find_ram_mb("Remember to attach a 20 GB volume") is None
+
+
+def test_ram_regex_takes_max_of_multiple_ram_contexts():
+    assert analyze._find_ram_mb("min memory 512mb, recommended memory 2gb") == 2048
+
+
 def test_deploy_doc_parse_flytoml():
     d = tempfile.mkdtemp()
     with open(os.path.join(d, "fly.toml"), "w") as f:

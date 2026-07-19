@@ -212,11 +212,18 @@ def parse_deploy_docs(path):
 
 def _find_ram_mb(text):
     """Pull a RAM figure from prose/tables/toml. Handles '~6 GB', 'memory = "2gb"',
-    '6144 MB'. Takes the first RAM-context match."""
-    for m in re.finditer(r"(?:RAM|memory|mem)[^\n]{0,40}?[~>=]*\s*(\d+(?:\.\d+)?)\s*(gb|mb|g|m)\b",
+    '6144 MB'. \\b-bounded context ('Remember' must not match 'mem'); takes the
+    MAX of all RAM-context matches, not the first (a doc can mention a smaller
+    number — e.g. a min — before the real requirement)."""
+    best = None
+    for m in re.finditer(r"\b(?:memory|RAM|mem)\b[^\n]{0,40}?[~>=]*\s*(\d+(?:\.\d+)?)\s*(gb|mb|g|m)\b",
                          text, re.I):
         n = float(m.group(1)); unit = m.group(2).lower()
-        return int(n * 1024) if unit.startswith("g") else int(n)
+        mb = int(n * 1024) if unit.startswith("g") else int(n)
+        if best is None or mb > best:
+            best = mb
+    if best is not None:
+        return best
     # bare 'memory = "2gb"' (toml)
     m = re.search(r'memory\s*=\s*["\']?(\d+)\s*(gb|mb|g|m)', text, re.I)
     if m:
