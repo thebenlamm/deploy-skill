@@ -69,10 +69,12 @@ or just *"deploy this repo to my AWS."* Claude will:
 - **AWS / Lightsail only**, today. The recipes are portable in spirit; other clouds aren't wired up.
 - **Stack coverage.** Static, Node, Python, Java/Maven, and Node+JVM polyglot are exercised. Exotic stacks may need a new recipe.
 
-### Known gaps (named on purpose — the analyzer doesn't catch these yet; the skill prose does)
+### Known gaps (named on purpose)
 
-Two real deploys surfaced six things the human/agent still handles by hand. They live as
-guidance in `SKILL.md`, **not** as code in `analyze.py` — so don't trust the analyzer alone:
+Two real deploys surfaced six things the human/agent still handles by hand. All six live as
+guidance in `SKILL.md`. Four of them — swap-before-build, `sslmode=require`, `NEXT_PUBLIC_*`
+build-time inlining, and the Supabase/Vercel BYOC check — are now surfaced by the analyzer as
+warnings too; SKILL.md carries the full guidance:
 
 - **Platform/DB-usage detection is manual.** The load-bearing BYOC question — *"is this a
   Vercel/Supabase app, and can I repoint it at my own Postgres?"* — is answered by a human
