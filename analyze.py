@@ -2,13 +2,21 @@
 """deploy-concierge analyzer — point it at a repo, get a sized deploy plan.
 
 Usage:
-    python3 analyze.py <github-url | local-path>
+    python3 analyze.py [--json-only] <github-url | local-path>
 
-Output: the JSON deploy plan on stdout, a human-readable summary on stderr.
-No file is written. The plan is what drives provisioning (Lightsail VM /
-S3+CloudFront) via local `aws --profile <name>` commands run by the operator/
-agent. Goal: compress the *figuring-out* — stack, DB, port, JVM, memory, cost
-— into one command.
+Output: the JSON deploy plan on stdout, a human-readable summary on stderr
+(suppressed with --json-only). No file is written. The plan is what drives
+provisioning (Lightsail VM / S3+CloudFront) via local `aws --profile <name>`
+commands run by the operator/agent. Goal: compress the *figuring-out* —
+stack, DB, port, JVM, memory, cost — into one command.
+
+Exit-code contract (E1 — the driving agent branches on this):
+    0 = clean plan, no warnings.
+    3 = plan produced but has warnings — still usable, needs a look.
+    2 = usage error (missing argument).
+    1 = clone/scan failure (bad URL, network, permissions) — a JSON error
+        object {"error": ..., "source": ...} is printed on stdout plus a
+        one-line message on stderr; no traceback.
 
 Every analysis step below traces to a real failure from deploy #1 (Parshandata).
 Dependency-free (stdlib only) so it runs anywhere.
@@ -16,6 +24,7 @@ Dependency-free (stdlib only) so it runs anywhere.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -336,6 +345,38 @@ def check_unresolved_imports(path, max_files=600):
     return missing
 
 
+# ---- E1: prefilled AskUserQuestion gates ---------------------------------
+# The analyzer can size and detect, but three decisions are the operator's,
+# not ours: which AWS account eats the spend, which branch actually builds,
+# and whether the box should be open or gated. Feed the driving agent
+# ready-to-ask questions instead of making it re-derive the context.
+
+def _build_gates(facts, plan):
+    spend_ctx = (f"{plan.get('instance_class') or 'static (S3+CloudFront)'}, "
+                 f"~${plan['est_monthly_usd']}/mo")
+    import_warnings = [f"{m['import']} in {m['file']}"
+                        for m in (facts.get("unresolved_imports") or [])]
+    branch_ctx = ("; ".join(import_warnings) if import_warnings
+                  else "no unresolved-import warnings found")
+    privacy_ctx = ("Let's Encrypt publishes the hostname to Certificate "
+                   "Transparency logs within minutes of cert issuance — the "
+                   "box is internet-discoverable regardless of whether the "
+                   "URL is shared.")
+    return [
+        {"id": "spend",
+         "question": f"Confirm target AWS account/profile before provisioning "
+                     f"(est. {spend_ctx}). Which profile?",
+         "context": spend_ctx},
+        {"id": "branch",
+         "question": "Which branch is actually deployable?",
+         "context": branch_ctx},
+        {"id": "privacy",
+         "question": "Should this app be open to the public internet or gated "
+                     "(app auth / IP allowlist)?",
+         "context": privacy_ctx},
+    ]
+
+
 # ---- recommender ---------------------------------------------------------
 
 def recommend_target(facts):
@@ -352,7 +393,7 @@ def recommend_target(facts):
                  and not dbs and not facts.get("has_server", True))
 
     if is_static:
-        return {
+        plan = {
             "target": "s3-cloudfront", "hosting_model": "static",
             "why": "Static front-end build, no server process or DB. S3 + CloudFront is cheapest correct.",
             "est_monthly_usd": 3, "instance_class": None, "required_ram_mb": None,
@@ -361,6 +402,8 @@ def recommend_target(facts):
                            "Create S3 bucket, upload build, front with CloudFront",
                            "Connect domain via Route 53 / ACM (cert in us-east-1)"],
         }
+        plan["gates"] = _build_gates(facts, plan)
+        return plan
 
     if not known_lang or not fw:
         warnings.append("No positive static evidence (unknown language / no frameworks "
@@ -412,7 +455,7 @@ def recommend_target(facts):
                         f"(check the right branch / a file may be uncommitted).")
 
     est = usd + (15 if managed_db else 0)
-    return {
+    plan = {
         "target": "lightsail-vm", "hosting_model": "vm",
         "why": f"Long-running server process needing ~{required_mb}MB RAM ({basis}). "
                f"Lightsail VM '{cls}' ({ram}MB) is the cheapest correct fit — and ~half the "
@@ -426,6 +469,8 @@ def recommend_target(facts):
             "systemd unit + Caddy auto-TLS reverse proxy", "Connect domain + warmup",
         ],
     }
+    plan["gates"] = _build_gates(facts, plan)
+    return plan
 
 
 # ---- repo scanner --------------------------------------------------------
@@ -646,39 +691,59 @@ def _clone_if_url(target):
 
 
 def main(argv):
+    json_only = "--json-only" in argv
+    argv = [a for a in argv if a != "--json-only"]
     if len(argv) < 2:
-        print("usage: analyze.py <github-url | local-path>", file=sys.stderr)
+        print("usage: analyze.py [--json-only] <github-url | local-path>", file=sys.stderr)
         return 2
-    path = _clone_if_url(argv[1])
-    facts = scan_repo(path)
-    plan = recommend_target(facts)
-    print(json.dumps({"source": argv[1], "facts": facts, "plan": plan}, indent=2))
+    target = argv[1]
 
-    p, fct = plan, facts
-    e = sys.stderr
-    print("\n" + "=" * 64, file=e)
-    print(f"  STACK    : {fct['language']} | runtimes: {', '.join(fct['runtimes'])}"
-          + (f" (entry: {fct['entrypoint_runtime']})" if fct.get('entrypoint_runtime') else ""), file=e)
-    print(f"  DATABASE : {', '.join(fct['databases']) or 'none'}", file=e)
-    if fct.get("deploy_docs"):
-        print(f"  SPEC     : {fct['deploy_docs']}", file=e)
-    print(f"  TARGET   : {p['target']}"
-          + (f"  [{p['instance_class']}, ~{p['required_ram_mb']}MB]" if p.get('instance_class') else "")
-          + f"  (~${p['est_monthly_usd']}/mo)", file=e)
-    if p.get("ram_basis"):
-        print(f"  SIZED BY : {p['ram_basis']}", file=e)
-    if p["warnings"]:
-        print("  WARNINGS :", file=e)
-        for w in p["warnings"]:
-            print(f"     ! {w}", file=e)
-    print("  NEXT     :", file=e)
-    for s in p["next_steps"]:
-        print(f"     -> {s}", file=e)
-    print("  PROVISIONING CAVEATS (platform must handle, not the analyzer):", file=e)
-    for c in p.get("provisioning_caveats", []):
-        print(f"     * {c}", file=e)
-    print("=" * 64, file=e)
-    return 0
+    try:
+        path = _clone_if_url(target)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        # clone/scan failure — JSON error on stdout, one-liner on stderr, no
+        # traceback (this is what the driving agent parses on exit code 1).
+        print(json.dumps({"error": str(exc), "source": target}, indent=2))
+        print(f"error: clone failed for {target}: {exc}", file=sys.stderr)
+        return 1
+
+    tmp = path if path != target else None
+    try:
+        facts = scan_repo(path)
+        plan = recommend_target(facts)
+        print(json.dumps({"source": target, "facts": facts, "plan": plan}, indent=2))
+
+        if not json_only:
+            p, fct = plan, facts
+            e = sys.stderr
+            print("\n" + "=" * 64, file=e)
+            print(f"  STACK    : {fct['language']} | runtimes: {', '.join(fct['runtimes'])}"
+                  + (f" (entry: {fct['entrypoint_runtime']})" if fct.get('entrypoint_runtime') else ""), file=e)
+            print(f"  DATABASE : {', '.join(fct['databases']) or 'none'}", file=e)
+            if fct.get("deploy_docs"):
+                print(f"  SPEC     : {fct['deploy_docs']}", file=e)
+            print(f"  TARGET   : {p['target']}"
+                  + (f"  [{p['instance_class']}, ~{p['required_ram_mb']}MB]" if p.get('instance_class') else "")
+                  + f"  (~${p['est_monthly_usd']}/mo)", file=e)
+            if p.get("ram_basis"):
+                print(f"  SIZED BY : {p['ram_basis']}", file=e)
+            if p["warnings"]:
+                print("  WARNINGS :", file=e)
+                for w in p["warnings"]:
+                    print(f"     ! {w}", file=e)
+            print("  NEXT     :", file=e)
+            for s in p["next_steps"]:
+                print(f"     -> {s}", file=e)
+            print("  PROVISIONING CAVEATS (platform must handle, not the analyzer):", file=e)
+            for c in p.get("provisioning_caveats", []):
+                print(f"     * {c}", file=e)
+            print("=" * 64, file=e)
+        return 3 if plan["warnings"] else 0
+    finally:
+        # tempdir hygiene: only clean up dirs WE created via clone, never a
+        # local path the caller passed in.
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

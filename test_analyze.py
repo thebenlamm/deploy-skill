@@ -6,8 +6,11 @@ Detection + recommendation logic is the part worth testing — it decides what
 gets provisioned and how big. Every test below traces to a real failure from
 deploy #1 (Parshandata). See deploys/001-parshandata.md.
 """
+import contextlib
+import io
 import json
 import os
+import subprocess
 import tempfile
 import analyze
 
@@ -372,6 +375,63 @@ def test_scan_repo_polyglot_node_java():
     assert facts["deploy_docs"]["ram_mb"] == 6144
     rec = analyze.recommend_target(facts)
     assert rec["instance_class"] == "large"
+
+
+# ====================================================================
+# E1 — agent contract: exit codes, --json-only, gates, clone-failure JSON
+# ====================================================================
+
+def test_main_exit_0_for_clean_static_repo():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"react": "^18", "vite": "^5"}}, f)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = analyze.main(["analyze.py", d, "--json-only"])
+    assert rc == 0
+
+
+def test_main_exit_3_when_plan_has_warnings():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"express": "^4"}}, f)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = analyze.main(["analyze.py", d, "--json-only"])
+    assert rc == 3
+
+
+def test_main_gates_array_has_three_ids():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "package.json"), "w") as f:
+        json.dump({"dependencies": {"express": "^4"}}, f)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        analyze.main(["analyze.py", d, "--json-only"])
+    out = json.loads(buf.getvalue())
+    ids = {g["id"] for g in out["plan"]["gates"]}
+    assert ids == {"spend", "branch", "privacy"}
+
+
+def test_main_bad_clone_returns_1_with_json_error_no_traceback():
+    """Monkeypatch subprocess.run rather than hitting the network — a real
+    bad URL would just hang/fail slowly in CI."""
+    orig_run = analyze.subprocess.run
+
+    def fake_run(cmd, check=True):
+        raise subprocess.CalledProcessError(128, cmd)
+
+    analyze.subprocess.run = fake_run
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = analyze.main(["analyze.py", "https://example.com/nope.git", "--json-only"])
+    finally:
+        analyze.subprocess.run = orig_run
+    assert rc == 1
+    err = json.loads(buf.getvalue())
+    assert err["source"] == "https://example.com/nope.git"
+    assert "error" in err
 
 
 if __name__ == "__main__":
