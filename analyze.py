@@ -4,9 +4,11 @@
 Usage:
     python3 analyze.py <github-url | local-path>
 
-Output: deploy-plan.json + a human summary. The plan is what drives provisioning
-(Lightsail VM / S3) via aws-mcp. Goal: compress the *figuring-out* — stack, DB,
-port, JVM, memory, cost — into one command.
+Output: the JSON deploy plan on stdout, a human-readable summary on stderr.
+No file is written. The plan is what drives provisioning (Lightsail VM /
+S3+CloudFront) via local `aws --profile <name>` commands run by the operator/
+agent. Goal: compress the *figuring-out* — stack, DB, port, JVM, memory, cost
+— into one command.
 
 Every analysis step below traces to a real failure from deploy #1 (Parshandata).
 Dependency-free (stdlib only) so it runs anywhere.
@@ -251,10 +253,16 @@ def _find_ram_mb(text):
 
 def estimate_required_ram_mb(facts):
     """Return (mb, basis). Priority: explicit deploy-doc > JVM heap + headroom >
-    stack baseline. Returns the strongest signal available."""
+    stack baseline. Returns the strongest signal available. A doc-derived
+    figure is self-reported by the repo, not verified — cap it at 16GB (a
+    huge in-repo claim is more likely a typo/aspiration than ground truth)
+    and label the basis accordingly."""
     docs = facts.get("deploy_docs") or {}
     if docs.get("ram_mb"):
-        return docs["ram_mb"], f"explicit RAM from {docs.get('source_file', 'deploy doc')}"
+        mb = min(docs["ram_mb"], 16384)
+        basis = (f"explicit RAM from {docs.get('source_file', 'deploy doc')} "
+                 f"(repo-claimed, unverified)")
+        return mb, basis
 
     heap = facts.get("jvm_heap_mb")
     if heap:

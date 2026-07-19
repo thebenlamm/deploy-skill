@@ -170,6 +170,14 @@ def test_required_ram_from_heap_flag_when_no_doc():
     assert mb >= 4096 + 1024              # heap + node/os headroom
     assert "heap" in basis.lower()
 
+def test_required_ram_caps_doc_derived_figure_at_16gb():
+    """A repo-claimed RAM figure is self-reported, not verified — an
+    implausible 32GB claim is more likely a typo than ground truth."""
+    facts = {"deploy_docs": {"ram_mb": 32768, "source_file": "hosting-spec.md"}}
+    mb, basis = analyze.estimate_required_ram_mb(facts)
+    assert mb == 16384
+    assert "unverified" in basis
+
 
 # ====================================================================
 # LEARNING 3+7 — sizing recommends the right VM, not a $7 nano,
