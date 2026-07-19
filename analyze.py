@@ -181,11 +181,16 @@ def parse_dockerfile(text):
                 port = int(m.group(1))
         elif up.startswith(("CMD ", "ENTRYPOINT ")):
             low = line.lower()
-            for rt in ("node", "java", "python", "ruby", "go", "php"):
-                tok = "python" if rt == "python" else rt
-                if re.search(rf"\b{tok}3?\b", low):
-                    entrypoint_runtime = rt
-                    break
+            # `CMD ["npm","start"]` (also yarn/pnpm/npx) never mentions "node"
+            # literally — the runtime is node regardless of the JS package manager.
+            if re.search(r"\b(npm|yarn|pnpm|npx)\b", low):
+                entrypoint_runtime = "node"
+            else:
+                for rt in ("node", "java", "python", "ruby", "go", "php"):
+                    tok = "python" if rt == "python" else rt
+                    if re.search(rf"\b{tok}3?\b", low):
+                        entrypoint_runtime = rt
+                        break
         # heap flag can appear in ENV or CMD
         if jvm_heap_mb is None:
             jvm_heap_mb = _parse_heap_mb(line)
@@ -312,7 +317,16 @@ _SRC_EXTS = (".svelte", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".vue")
 _FLAGGABLE_EXTS = (".svelte", ".vue", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 def check_unresolved_imports(path, max_files=600):
+    """Returns (missing, truncated). `truncated` is True when max_files was hit
+    mid-scan — the caller (scan_repo/recommend_target) must not present a
+    truncated result as an exhaustive clean bill of health.
+
+    CAVEAT: macOS/Windows filesystems are case-insensitive by default, so an
+    import whose case doesn't match the on-disk filename (which DOES fail a
+    real Linux build) passes `os.path.exists` here and is invisible locally —
+    this check is only fully trustworthy run on a case-sensitive FS."""
     missing, seen, scanned = [], set(), 0
+    truncated = False
     for root, dirs, files in os.walk(path):
         dirs[:] = [d for d in dirs if d not in
                    ("node_modules", ".git", "build", "dist", ".svelte-kit", "target")]
@@ -320,7 +334,8 @@ def check_unresolved_imports(path, max_files=600):
             if not fn.endswith(_SRC_EXTS):
                 continue
             if scanned >= max_files:
-                return missing
+                truncated = True
+                return missing, truncated
             scanned += 1
             fp = os.path.join(root, fn)
             try:
@@ -328,21 +343,28 @@ def check_unresolved_imports(path, max_files=600):
                     src = f.read()
             except Exception:
                 continue
-            for spec in _IMPORT_RE.findall(src):
-                base = spec.rsplit("/", 1)[-1]
-                if base.startswith("$"):                 # virtual module ($types …)
+            # line-level heuristic only (no parser): a commented-out import
+            # must not be flagged, but a real missing import elsewhere in the
+            # same file still must be.
+            for line in src.splitlines():
+                ln = line.lstrip()
+                if ln.startswith(("//", "*", "/*")):
                     continue
-                if not spec.endswith(_FLAGGABLE_EXTS):    # explicit-extension only
-                    continue
-                target = os.path.normpath(os.path.join(root, spec))
-                if os.path.exists(target):
-                    continue
-                key = (os.path.relpath(fp, path), spec)
-                if key in seen:
-                    continue
-                seen.add(key)
-                missing.append({"file": key[0], "import": spec})
-    return missing
+                for spec in _IMPORT_RE.findall(line):
+                    base = spec.rsplit("/", 1)[-1]
+                    if base.startswith("$"):                 # virtual module ($types …)
+                        continue
+                    if not spec.endswith(_FLAGGABLE_EXTS):    # explicit-extension only
+                        continue
+                    target = os.path.normpath(os.path.join(root, spec))
+                    if os.path.exists(target):
+                        continue
+                    key = (os.path.relpath(fp, path), spec)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    missing.append({"file": key[0], "import": spec})
+    return missing, truncated
 
 
 # ---- E1: prefilled AskUserQuestion gates ---------------------------------
@@ -453,6 +475,8 @@ def recommend_target(facts):
     for m in (facts.get("unresolved_imports") or [])[:5]:
         warnings.append(f"Unresolved import {m['import']} in {m['file']} — will FAIL the build "
                         f"(check the right branch / a file may be uncommitted).")
+    if facts.get("import_scan_truncated"):
+        warnings.append("import scan truncated at 600 files — clean result is not exhaustive")
 
     est = usd + (15 if managed_db else 0)
     plan = {
@@ -642,6 +666,7 @@ def scan_repo(path):
     ) or "vercel.json" in files
 
     deploy_docs = parse_deploy_docs(path)
+    unresolved_imports, import_scan_truncated = check_unresolved_imports(path)
     entrypoint = docker.get("entrypoint_runtime")
     has_server = bool(entrypoint) or any(f in SERVER_FRAMEWORKS for f in frameworks) or \
         (language in {"java", "go", "ruby", "php", "rust"}) or \
@@ -661,7 +686,8 @@ def scan_repo(path):
         "port": docker.get("port") or _detect_listen_port(path),
         "jvm_heap_mb": docker.get("jvm_heap_mb"),
         "deploy_docs": deploy_docs,
-        "unresolved_imports": check_unresolved_imports(path),
+        "unresolved_imports": unresolved_imports,
+        "import_scan_truncated": import_scan_truncated,
         "env_hint": "see .env.example" if ".env.example" in files else None,
         "deps": deps,
         "next_public_env": next_public_env,

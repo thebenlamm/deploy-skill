@@ -222,7 +222,7 @@ def test_unresolved_import_is_flagged():
                 "import express from 'express'\n")           # npm pkg — must NOT flag
     with open(os.path.join(sub, "Present.svelte"), "w") as f:
         f.write("<div/>")
-    missing = analyze.check_unresolved_imports(d)
+    missing, _truncated = analyze.check_unresolved_imports(d)
     names = [m["import"] for m in missing]
     assert "./_RecentSearches.svelte" in names
     assert "./Present.svelte" not in names        # exists
@@ -240,7 +240,8 @@ def test_import_check_ignores_virtual_and_extensionless():
         f.write("import type { X } from './$types'\n"          # virtual — skip
                 "import { y } from './DaiquiriGenerated'\n"      # extensionless — skip
                 "import { z } from './also-missing'\n")          # extensionless — skip
-    assert analyze.check_unresolved_imports(d) == []
+    missing, _truncated = analyze.check_unresolved_imports(d)
+    assert missing == []
 
 
 # ====================================================================
@@ -432,6 +433,38 @@ def test_main_bad_clone_returns_1_with_json_error_no_traceback():
     err = json.loads(buf.getvalue())
     assert err["source"] == "https://example.com/nope.git"
     assert "error" in err
+
+
+# ====================================================================
+# E2 — detection polish: npm/yarn/pnpm/npx entrypoint, commented-out
+# imports skipped, truncated-scan flag surfaced
+# ====================================================================
+
+def test_dockerfile_npm_start_cmd_detects_node_entrypoint():
+    d = analyze.parse_dockerfile('FROM node:20\nCMD ["npm", "start"]\n')
+    assert d["entrypoint_runtime"] == "node"
+
+
+def test_commented_import_not_flagged_but_real_missing_import_is():
+    d = tempfile.mkdtemp()
+    sub = os.path.join(d, "src")
+    os.makedirs(sub)
+    with open(os.path.join(sub, "a.ts"), "w") as f:
+        f.write("// import ok from './CommentedOut.ts'\n"
+                "import bad from './ReallyMissing.ts'\n")
+    missing, _truncated = analyze.check_unresolved_imports(d)
+    names = [m["import"] for m in missing]
+    assert "./CommentedOut.ts" not in names
+    assert "./ReallyMissing.ts" in names
+
+
+def test_import_scan_truncated_flag_on_max_files_hit():
+    d = tempfile.mkdtemp()
+    for name in ("a.ts", "b.ts"):
+        with open(os.path.join(d, name), "w") as f:
+            f.write("const x = 1\n")
+    missing, truncated = analyze.check_unresolved_imports(d, max_files=1)
+    assert truncated is True
 
 
 if __name__ == "__main__":
