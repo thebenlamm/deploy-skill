@@ -2,6 +2,23 @@
 
 A maintained personal tool, not a venture. Entries trace to a real deploy's friction log.
 
+## [0.4.0] — 2026-07-18 — FIX_PLAN remainder: day-2 ops + agent contract + verify/audit tooling
+Completes every open row (C4–C7, E1–E4):
+- **`doctor.py`** (new): mechanizes "verify like a user" — exit 4 when the primary surface
+  is empty; finds pipeline scripts (seed→ingest→enrich), orphan drizzle migrations
+  (the silent-drift failure), and required env keys. Wired into SKILL.md's verify phase.
+- **`audit.py`** (new): cost sweep over `deploys/*/state.json`; `--live` reconciles against
+  AWS and emits teardown commands — only for boxes tagged `managed-by=deploy-concierge`
+  (never proposes deleting instances the skill didn't create). 17 tests (`test_doctor.py`).
+- **Analyzer agent contract (E1/E2)**: exit codes 0/3/1/2, `--json-only`, a prefilled
+  `gates` array (spend/branch/privacy AskUserQuestion feed), clean clone-failure JSON,
+  tempdir cleanup; npm/yarn/pnpm CMD → node entrypoint, commented-out imports not flagged,
+  truncated import scans say so. 39 analyzer tests.
+- **Runbooks (C4–C7)**: redeploy section (stop → re-tar → rebuild → migrate → start →
+  re-verify; no second instance), swap block for <4GB boxes, journalctl debugging paths,
+  bounded provisioning poll + key-pair write guard, `Restart=always` + unit Description,
+  JDK version detected from pom.xml, AZ-fallback and sslip.io-no-SLA notes.
+
 ## [0.3.0] — 2026-07-18 — four-lens review executed (Phases 1–3 + C1–C3 of FIX_PLAN.md)
 Full-repo review (correctness / security / infra-ops / skill-design); findings cataloged
 in `FIX_PLAN.md` and the wrong-answer-producing + structurally-dishonest set fixed:

@@ -1,10 +1,11 @@
 # Fix Plan — 2026-07-18 review
 
-> **Execution status (2026-07-18):** Phases 1–3 + C1–C3 DONE — scope: all rows
-> A1–A5, S1–S7, D1–D4, C1–C3, verified by 32/32 analyzer tests + e2e fixture runs
-> (SvelteKit-SSR → vm, monorepo → vm+warning). Commits `dedfb2a..60b7738` + CHANGELOG
-> 0.3.0. **Still open:** C4–C7 (journalctl, redeploy runbook, swap recipe, unit polish)
-> and Phase 5 (E1–E4: exit-code contract, detection polish, doctor.py, audit.py).
+> **Execution status (2026-07-18): ALL ROWS DONE.** Phases 1–3 + C1–C3 in v0.3.0
+> (commits `dedfb2a..60b7738`); C4–C7 + E1–E4 in v0.4.0 (doctor.py, audit.py,
+> analyzer exit-code/gates contract, redeploy/swap/journalctl runbooks). Verified:
+> 39/39 analyzer tests, 17/17 doctor/audit tests, e2e fixture runs. Runbook changes
+> are inspection-verified; the next real deploy is their integration test — file its
+> friction log against this plan.
 
 Findings from a 4-lens review (correctness, security, infra/ops, skill-design), all
 verified against code; analyzer P0s were confirmed by execution. Ordered by blast
