@@ -130,6 +130,10 @@ def parse_dockerfile(text):
     runtimes, build_steps = [], []
     base = entrypoint_runtime = port = jvm_heap_mb = None
 
+    # join backslash-continued lines first — a multi-line `RUN apt-get ... && \`
+    # otherwise splits the apt package list onto a line we never inspect.
+    text = re.sub(r"\\\s*\n\s*", " ", text)
+
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -137,11 +141,13 @@ def parse_dockerfile(text):
         up = line.upper()
 
         if up.startswith("FROM "):
-            img = line.split()[1].split("/")[-1].split(":")[0].lower()
-            base = img
-            for key, rt in _BASE_IMAGE_RUNTIME.items():
-                if img.startswith(key) and rt not in runtimes:
-                    runtimes.append(rt)
+            tokens = [t for t in line.split()[1:] if not t.startswith("--")]
+            if tokens:
+                img = tokens[0].split("/")[-1].split(":")[0].lower()
+                base = img
+                for key, rt in _BASE_IMAGE_RUNTIME.items():
+                    if img.startswith(key) and rt not in runtimes:
+                        runtimes.append(rt)
         elif up.startswith("RUN "):
             body = line[4:]
             build_steps.append(body)

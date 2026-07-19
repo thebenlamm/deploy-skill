@@ -73,6 +73,22 @@ HOSTING_SPEC = """# Hosting requirements
 | Disk | 10 GB SSD |
 """
 
+DOCKERFILE_CONTINUATION = """FROM node:20
+RUN apt-get update && \\
+    apt-get install -y openjdk-17-jdk maven
+CMD ["node", "server.js"]
+"""
+
+def test_dockerfile_line_continuation_detects_java():
+    d = analyze.parse_dockerfile(DOCKERFILE_CONTINUATION)
+    assert "java" in d["runtimes"]
+
+def test_dockerfile_from_platform_flag_is_skipped():
+    d = analyze.parse_dockerfile("FROM --platform=linux/amd64 node:20\n")
+    assert d["base"].startswith("node")
+    assert "node" in d["runtimes"]
+
+
 def test_deploy_doc_parse_reads_ram():
     d = tempfile.mkdtemp()
     with open(os.path.join(d, "hosting-spec.md"), "w") as f:
