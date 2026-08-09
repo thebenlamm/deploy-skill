@@ -1,7 +1,7 @@
 # 001 — masorah-review
 
-**Date:** 2026-08-09 · **Status:** LIVE at https://review.openmasorah.com — 3 items open (see bottom)
-**Repo:** `/Users/benlamm/Workspace/masorah/masorah-review` @ `f510105` (main, clean tree)
+**Date:** 2026-08-09 · **Status:** COMPLETE — live at https://review.openmasorah.com, reached via openmasorah.com/review
+**Repo:** `/Users/benlamm/Workspace/masorah/masorah-review` — deployed from `f510105`, now serving `7f1c528` (main)
 **Stack:** FastAPI + uvicorn (Python 3.12, `uv`), external Postgres (hosted Supabase), static HTML/JS
 **Target:** Lightsail `micro_3_0` (1GB), us-east-1a, profile `openmasorah` (acct 338375260556)
 **Cost:** ~$7/mo instance + static IP (free while attached)
@@ -73,8 +73,12 @@ the TCP level. `app/main.py:102` catches only `SQLAlchemyError`, but a refused c
 propagates as a raw `ConnectionRefusedError`/`OSError` that SQLAlchemy's asyncpg dialect
 does not wrap. Verified against the live box's traceback, with the `ProtectHome` issue
 above already ruled out as the cause. `README.md` and `docs/ops-runbook.md` both promise
-503. Suggested fix: `except (SQLAlchemyError, OSError)`. Reported to the operator; not
-applied (out of scope for a deploy, and it is an app-code change).
+503. **Fixed** at the operator's request: `except (SQLAlchemyError, OSError)`, plus the
+test that would have caught it — the existing 503 test hand-built a SQLAlchemy
+`OperationalError`, a shape the real producer never emits at that layer, so it asserted
+the one failure mode that was never the risk. Three parametrised cases now cover what
+asyncpg actually raises (`ConnectionRefusedError`, `socket.gaierror`, `TimeoutError`).
+Verified on the live box by pointing it at a dead host: 503, then restored.
 
 ### 6. Supabase direct host is IPv6-only — but Lightsail is dual-stack, so it worked
 `DATABASE_URL` uses the direct form `db.<ref>.supabase.co:5432`, which has **no A record**
@@ -99,6 +103,27 @@ repo exposes auth routers, `doctor.py` should report `AUTH-GATED — primary sur
 externally verifiable` as a distinct verdict rather than `EMPTY`. Conflating "gated" with
 "empty" trains the operator to ignore a red check, which is worse than either verdict.
 Until then, the emptiness check must be satisfied by a manual authenticated pass.
+
+### 8. The operator's public IP rotates mid-deploy — MECHANIZABLE
+Port 22 is pinned to a single `/32`, and on a residential connection that address
+changes. It happened **twice in one session** (71.104.57.122 → 70.111.79.171), each time
+surfacing as an SSH timeout with no obvious cause several steps after the pin was set.
+
+`provisioning.md` says "re-run this line if your IP changes", which is not enough — the
+failure looks like a dead box, not a firewall rule. Worth a `doctor.py` check or a small
+`reping.sh` that compares `curl -4 -s ifconfig.me` against
+`get-instance-port-states` and re-pins if they differ. Diagnose an SSH timeout by
+checking the allowlist **before** suspecting the instance.
+
+### 9. "Connect a domain" can mean a manual publish, not a git push — NOT MECHANIZABLE
+The redirect fronting this deploy lives in a Netlify site whose `build_settings.repo_url`
+is `None` — no git connection. Committing and pushing the config changed nothing, and the
+symptom was a 404 that looked like a propagation delay for five minutes of polling.
+
+Check `listSites` (or the platform equivalent) for a repo binding **before** assuming a
+push deploys. And note that a manual publish ships the whole working tree: this one
+carried two unrelated commits that had been sitting undeployed for a day, which is the
+operator's call to make, not the deploy's.
 
 ## Verified on the interim host (sslip.io, placeholder DB) — build-time checkpoint
 
@@ -166,10 +191,14 @@ it, so this is not a 200-with-an-empty-surface deploy.
    cleanup to exactly the row you created; a blanket delete of that user's sessions logged
    the operator out of an account he was actively using.
 
-3. **`openmasorah.com/review` redirect not applied** — it lives in `openmasorah-site`,
-   a different repo. See `../001-masorah-review-RUNBOOK-openmasorah-site.md`. This is the
-   only remaining item the operator must do personally, and only because the standing rule
-   is that the invoked repo is the sole writable one.
+3. ~~**`openmasorah.com/review` redirect not applied**~~ **RESOLVED** — operator granted
+   write access to `openmasorah-site`; the two 302 rules landed and the site was published
+   manually (see friction item 9). Verified with a GET follow:
+   `openmasorah.com/review` → 3 hops → `review.openmasorah.com/login`, 200.
+
+   Unrelated pre-existing quirk noticed while verifying: the app returns **405 to HEAD on
+   `/`** (GET gives 302). Browsers are unaffected, but a HEAD-based uptime monitor would
+   report the deploy as broken. Reported, not fixed — out of scope for the deploy.
 
 4. **Product blocker found by using the deployed app, not by testing it.** The active batch
    asks reviewers to verify text at a given *line number* — median line 13, max 31 — and
