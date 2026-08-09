@@ -2,6 +2,27 @@
 
 A maintained personal tool, not a venture. Entries trace to a real deploy's friction log.
 
+## [0.5.0] — 2026-08-09 — deploy #001 (masorah-review): FastAPI + external Postgres
+First Python/FastAPI deploy and first "serve it under an existing marketing site" ask.
+All entries trace to `deploys/001-masorah-review.md`:
+- **`ProtectHome=tmpfs`, not `true`, in the unit template** — the highest-value fix here.
+  `ProtectHome=true` makes Postgres clients' stat of `~/.postgresql/postgresql.key` raise
+  `PermissionError` (EACCES) rather than ENOENT, on *every* SSL connect. EACCES is an
+  `OSError`, which app-level `except SQLAlchemyError` handlers miss, so the app 500s on a
+  DB call that should have worked. Caught before the real credentials went in.
+- **`curl -4 -s ifconfig.me`** in §2 — on a dual-stack connection the unflagged form
+  returns IPv6 and `put-instance-public-ports` rejects it as an invalid IPv4 CIDR.
+- **DNS zone access is the long-pole blocker** — new §"Real domain" guidance: resolve it
+  *before* provisioning, sweep every profile for the zone, and read NS records to identify
+  the provider (`awsdns-*` = Route 53; `nsone.net` = Netlify DNS; a Netlify-hosted site
+  very often has Route 53 DNS). Plus create-record → wait-for-resolution → *then* point
+  Caddy, since Let's Encrypt validates against the live A record.
+- **New §"Serving an app under an existing marketing site"** — grep for root-absolute
+  links before promising `example.com/thing`; prefer a subdomain + **302** over a `200`
+  proxy rewrite (cookie scope), and remember a splat rule misses the bare path.
+- **Known gap, not yet fixed:** `doctor.py` reports auth-gated apps as `EMPTY`. It needs a
+  distinct `AUTH-GATED` verdict — conflating the two trains operators to ignore a red check.
+
 ## [0.4.0] — 2026-07-18 — FIX_PLAN remainder: day-2 ops + agent contract + verify/audit tooling
 Completes every open row (C4–C7, E1–E4):
 - **`doctor.py`** (new): mechanizes "verify like a user" — exit 4 when the primary surface

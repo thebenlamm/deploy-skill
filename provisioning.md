@@ -53,7 +53,7 @@ done
 # Port 22 restricted to the operator's current IP; re-run this line if your IP
 # changes. 80/443 stay open to the world.
 aws lightsail put-instance-public-ports --region $REGION --instance-name <APP> \
-  --port-infos fromPort=22,toPort=22,protocol=TCP,cidrs=$(curl -s ifconfig.me)/32 \
+  --port-infos fromPort=22,toPort=22,protocol=TCP,cidrs=$(curl -4 -s ifconfig.me)/32 \
                fromPort=80,toPort=80,protocol=TCP \
                fromPort=443,toPort=443,protocol=TCP
 
@@ -107,6 +107,14 @@ Type=simple
 User=app
 NoNewPrivileges=true
 ProtectSystem=strict
+# tmpfs, NOT true. With ProtectHome=true, /home is unreadable and a stat of
+# ~/.postgresql/postgresql.key raises PermissionError (EACCES) instead of a
+# clean ENOENT. Postgres clients (asyncpg, psycopg) stat that path on EVERY
+# SSL connect, and EACCES is an OSError that app-level `except SQLAlchemyError`
+# handlers do not catch — so the app 500s on a DB call that should have worked.
+# tmpfs gives an empty /home, the stat returns ENOENT, the client correctly
+# concludes "no client cert", and the hardening is preserved. (deploy #001)
+ProtectHome=tmpfs
 ReadWritePaths=/srv/<APP>
 # narrow further to the app's own data dir if it only writes e.g. /srv/<APP>/data
 WorkingDirectory=<RUN_DIR>          # e.g. /srv/<APP> or /srv/<APP>/frontend
@@ -158,3 +166,42 @@ rm -f "$D/<APP>-key.pem"   # stale private keys on the laptop are a liability
 ## Real domain (optional, later)
 Point an A record at `$IP`, set the Caddyfile host to the domain, restart Caddy
 (it gets a cert automatically). No CloudFront needed.
+
+**Resolve zone access BEFORE provisioning — it is the long-pole blocker.** The
+account that runs the app is usually not the account that owns the domain
+(deploy #001: the app's own account had zero hosted zones; the zone was in the
+Org management account, reachable only after an interactive `aws login`).
+```
+aws route53 list-hosted-zones --profile <P> --query 'HostedZones[].Name' --output json
+```
+Run that across every profile until the zone appears. Read the NS records first:
+`awsdns-*` means **Route 53**; Netlify DNS is `nsone.net`; Cloudflare is
+`*.ns.cloudflare.com`. Guessing the provider from "it's on Netlify" is wrong —
+a Netlify-hosted site very often has Route 53 DNS.
+
+Create the record, wait for it to resolve, and only THEN point Caddy at the name
+— Let's Encrypt validates over HTTP against the live A record, so a Caddy restart
+before propagation just burns a failed issuance attempt:
+```
+aws route53 change-resource-record-sets --hosted-zone-id <ZID> --profile <P> \
+  --change-batch '{"Changes":[{"Action":"CREATE","ResourceRecordSet":{
+    "Name":"<sub>.<domain>","Type":"A","TTL":300,
+    "ResourceRecords":[{"Value":"'"$IP"'"}]}}]}'
+until dig +short <sub>.<domain> @8.8.8.8 | grep -q .; do sleep 10; done
+```
+List the zone's existing records first — `CREATE` fails loudly on a collision,
+but knowing what is already there tells you whether you are about to shadow a
+production hostname.
+
+## Serving an app "under" an existing marketing site
+When the ask is `example.com/thing`, check whether the app assumes it lives at
+the URL root before promising a path. Grep the templates/JS for root-absolute
+links (`"/login"`, `"/api/`, `"/static/`) and the server for redirects to `"/"`.
+If they are hardcoded and the framework has no configured base path, a true
+path mount is an app code change, not a deploy option.
+
+The cheap answer that satisfies the ask: deploy at `thing.example.com` and add a
+**302** redirect from `/thing/*` at the existing site. Do NOT use a `200` proxy
+rewrite — that puts the app's session cookie on the apex shared with the other
+site, and forces you to proxy every root path the app uses. Note that a splat
+rule (`/thing/*`) does not match the bare `/thing`; you need both rules.
