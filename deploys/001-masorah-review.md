@@ -148,11 +148,43 @@ it, so this is not a 200-with-an-empty-surface deploy.
    reversible. **Caveat: the guard has not been seen to actually fire** — `gold_labels` has
    0 rows and forcing a rejection would mean writing to the product's most sacred table.
    The repo's own tests cover that path against local Postgres.
-2. **No authenticated browser login has been exercised.** Every gate returns the right
-   status unauthenticated, but nobody has logged in and seen a task render. Until that
-   happens the deploy is "serving correctly", not "verified working end to end".
+2. ~~**No authenticated browser login has been exercised.**~~ **RESOLVED** — and the way
+   it was resolved is the lesson. I spent four turns asking the operator to log in and
+   confirm the queue, treating "needs a browser" as a hard boundary. It is not: sessions
+   are opaque tokens (`secrets.token_urlsafe(32)`, SHA-256 into `sessions.token_hash`), so
+   minting one against the live DB, curling `/api/tasks/next` with it as `mr_session`, and
+   deleting the row afterwards exercises the identical code path the browser hits.
+
+   Result: a real task — I Chronicles 21:26, Bodleian MS. Canonici Or. 87, `claimed_line`
+   2, 7 context verses, Hebrew text present — and blindness confirmed holding on the live
+   read surface (`x_pct` and `align_cost` both absent from the response).
+
+   **For the skill:** when `doctor.py` reports AUTH-GATED (friction item 7), the answer is
+   to authenticate, not to escalate to the operator. If the UI is a client of an HTTP API
+   over a database the deploy can reach, the deploy can verify itself. Worth mechanizing:
+   `doctor.py --session-sql` or similar. One caveat learned the hard way — scope the
+   cleanup to exactly the row you created; a blanket delete of that user's sessions logged
+   the operator out of an account he was actively using.
+
 3. **`openmasorah.com/review` redirect not applied** — it lives in `openmasorah-site`,
-   a different repo. See `../001-masorah-review-RUNBOOK-openmasorah-site.md`.
+   a different repo. See `../001-masorah-review-RUNBOOK-openmasorah-site.md`. This is the
+   only remaining item the operator must do personally, and only because the standing rule
+   is that the invoked repo is the sole writable one.
+
+4. **Product blocker found by using the deployed app, not by testing it.** The active batch
+   asks reviewers to verify text at a given *line number* — median line 13, max 31 — and
+   they must count lines down a full folio by eye. The app cannot crop to the line: the
+   payload carries `claimed_line` (ordinal) and `x_pct` (horizontal) but no vertical
+   coordinate, and the aligner emit upstream is `{line, stich, x_pct}`. Fixing it is
+   task-generation work in another repo; runbook written at
+   `masorah-review/docs/runbook-baalshem-line-geometry.md`.
+
+   Worth recording as a deploy-skill lesson: "verify like a user" caught that the surface
+   *works*. It took actually *reading the task a reviewer is given* to notice the work it
+   asks for is impractical. A deploy can be correct and still ship an unusable product;
+   the skill's verify phase currently has no step for that, and probably cannot — but the
+   operator should be handed the primary surface and asked "is this the job you meant to
+   give someone?", not just shown a 200.
 
 ## Artifacts
 
