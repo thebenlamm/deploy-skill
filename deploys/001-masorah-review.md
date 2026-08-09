@@ -196,9 +196,17 @@ it, so this is not a 200-with-an-empty-surface deploy.
    manually (see friction item 9). Verified with a GET follow:
    `openmasorah.com/review` → 3 hops → `review.openmasorah.com/login`, 200.
 
-   Unrelated pre-existing quirk noticed while verifying: the app returns **405 to HEAD on
-   `/`** (GET gives 302). Browsers are unaffected, but a HEAD-based uptime monitor would
-   report the deploy as broken. Reported, not fixed — out of scope for the deploy.
+   Noticed while verifying, and worth carrying into the skill: the app returns **405 to
+   HEAD** on every route (`/`, `/login`, `/health`, `/health/ready`); only the `/static`
+   mount answers HEAD. This is **not a defect in the app** — I first recorded it as one and
+   was wrong. It is FastAPI's default: Starlette's `Route` adds HEAD to any GET route
+   (`starlette/routing.py:234`), but FastAPI's `APIRoute` sets methods exactly as declared
+   (`fastapi/routing.py:1021`). Verified against a three-line FastAPI app, which behaves
+   identically.
+
+   Operational consequence for any FastAPI deploy: **do not health-check a FastAPI app with
+   HEAD.** An uptime monitor defaulting to HEAD will report a perfectly healthy deploy as
+   down. Use GET against the liveness path.
 
 4. **Product blocker found by using the deployed app, not by testing it.** The active batch
    asks reviewers to verify text at a given *line number* — median line 13, max 31 — and
